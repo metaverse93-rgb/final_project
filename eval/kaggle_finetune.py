@@ -295,7 +295,7 @@ def finetune(model, tokenizer, train_data: list[dict]):
 
 def main():
     print("=" * 60)
-    print("삼선뉴스 Qwen3-4B-Instruct QLoRA 파인튜닝")
+    print("삼선뉴스 Qwen3.5-4B QLoRA 파인튜닝")
     print("=" * 60)
 
     # 데이터 로드

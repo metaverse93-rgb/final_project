@@ -32,15 +32,14 @@ Given a news article, produce ALL three outputs at once:
 3. **summary_casual**: Summarize in exactly {n} sentence(s) in casual Korean (일상체, ~해요/~예요/~거예요). Key points only.
 
 Rules:
-- Keep abbreviations like RAG, LLM, GPU, API, NPU in English.
-- CRITICAL: Keep ALL proper nouns in English exactly as written. NEVER transliterate them into Korean or Chinese characters.
-  Examples: Anthropic→Anthropic (NOT 앤트로피크), OpenAI→OpenAI (NOT 오픈에이아이), Google→Google, Meta→Meta, Nvidia→Nvidia, Slack→Slack, Alexa→Alexa, ChatGPT→ChatGPT, Gemini→Gemini, Llama→Llama.
-  # 고유명사 처리 규칙: 회사명·브랜드명·신조어는 영문 그대로 유지.
-  # 음차(앤트로피크, 오픈에이아이 등)하면 가독성이 떨어지고 검색도 안 되므로 영문 유지가 원칙.
-  # AI 신조어(Blackwell Ultra, LoRA 등)도 동일 — 첫 등장 시 영문(한국어 설명) 형식 병기.
+- Keep abbreviations like RAG, LLM, GPU, API, NPU in English only (no Korean).
+- CRITICAL: For ALL proper nouns (company names, product names, people), use the format: English(한국어 음차) — English FIRST, Korean in parentheses. Apply on first mention only, English only after that.
+  # 고유명사 병기 규칙: 반드시 영문을 앞에, 한국어 음차를 괄호 안에. 첫 등장 시에만 병기, 이후에는 영문만.
+  Examples: Anthropic(앤트로픽), OpenAI(오픈에이아이), Google(구글), Meta(메타), Nvidia(엔비디아), Slack(슬랙), Alexa(알렉사), ChatGPT(챗지피티), Gemini(제미나이), Llama(라마).
 - CRITICAL: Output Korean text only. Do NOT use any Chinese characters (漢字) in the output.
 - Transliterate technical terms: Fine-tuning→파인튜닝, Embedding→임베딩, Prompt→프롬프트.
-- For NEW coinages not yet widely known, use: OriginalTerm(한국어, brief explanation) on first mention.
+- For NEW coinages not yet widely known, use: OriginalTerm(한국어 음차, brief explanation) on first mention.
+  # 신조어 처리: 첫 등장 시 영문(한국어 음차, 설명) 형식. 예) Blackwell Ultra(블랙웰 울트라, Nvidia 차세대 GPU)
 - Summaries must NOT copy translation word-for-word.
 - Output ONLY valid JSON. No explanation, no preamble."""
 
@@ -71,7 +70,7 @@ def estimate_sentences(text: str, max_sentences: int = 3) -> int:
 def translate_and_summarize(
     text: str,
     summary_sentences: int = 3,
-    temperature: float = 0.3,
+    temperature: float = 0.1,
 ) -> dict:
     """
     영어 뉴스 기사를 격식체·일상체로 번역하고 요약합니다 (단일 LLM 호출).
@@ -98,7 +97,7 @@ def translate_and_summarize(
             {"role": "assistant", "content": PREFILL},
         ],
         options={
-            "temperature": temperature,
+            "temperature": 0.1,
             "num_predict": 3000,
             "num_gpu": 99,
         },

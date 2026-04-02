@@ -4,7 +4,7 @@ import os
 
 load_dotenv()
 
-MODEL = os.getenv("MODEL_NAME", "qwen3:4b")
+MODEL = os.getenv("MODEL_NAME", "qwen3.5:4b")
 
 FORMAL_PROMPT = """당신은 AI 뉴스 전문 번역가입니다.
 입력된 기사를 한국어 격식체로 번역하세요.

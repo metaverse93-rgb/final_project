@@ -1,6 +1,6 @@
 """
 파인튜닝 데이터 준비
-trainset.csv → trainset_chat.jsonl (Qwen3-4B-Instruct 채팅 포맷)
+trainset.csv → trainset_chat.jsonl (Qwen3.5-4B 채팅 포맷)
 
 Instruct 모델은 채팅 포맷(system/user/assistant)으로 학습해야 함.
 HuggingFace TRL SFTTrainer가 읽는 표준 JSONL 형식으로 변환.
