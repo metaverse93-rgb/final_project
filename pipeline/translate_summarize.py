@@ -114,13 +114,20 @@ def _extract_json(text: str) -> dict:
     if "</think>" in text:
         text = text.split("</think>")[-1].strip()
 
-    start = text.find("{")
-    if start != -1:
+    # { 위치를 모두 찾아 순서대로 파싱 시도 (prefill 충돌로 중복 JSON 생성 대응)
+    pos = 0
+    while True:
+        start = text.find("{", pos)
+        if start == -1:
+            break
         try:
             obj, _ = json.JSONDecoder().raw_decode(text, start)
-            return obj
+            # 필요한 키가 있는 객체만 반환
+            if "translation" in obj:
+                return obj
         except json.JSONDecodeError:
             pass
+        pos = start + 1
 
     return {
         "translation": text,

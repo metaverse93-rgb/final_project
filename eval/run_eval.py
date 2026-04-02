@@ -1,14 +1,16 @@
 """
 평가 실행기
-testset_1000.csv → Qwen3 추론 → BLEU/COMET/TPR + G-Eval → results.csv
+testset_1000.csv → Qwen3 추론 → BLEU/COMET/TPR + G-Eval → results.csv → Google Sheets
 
 실행:
     python eval/run_eval.py                    # 전체 1000건
     python eval/run_eval.py --limit 10         # 빠른 테스트 (10건)
-    python eval/run_eval.py --skip-geval       # G-Eval 제외 (OpenRouter 비용 절약)
+    python eval/run_eval.py --skip-geval       # G-Eval 제외 (비용 절약)
+    python eval/run_eval.py --skip-sheets      # Google Sheets 업로드 제외
 
 결과:
-    eval/data/results.csv   (상세 결과)
+    eval/data/results.csv          (상세 결과 로컬 저장)
+    Google Sheets → 평가결과 시트  (자동 업로드)
 """
 
 import sys
@@ -26,8 +28,11 @@ from eval.metrics.bleu_comet import calc_bleu_sentence
 from eval.metrics.term_preservation import check_term_preservation
 from eval.metrics.geval import geval_single
 
-TESTSET_PATH = os.path.join(os.path.dirname(__file__), "data", "testset_1000.csv")
-RESULTS_PATH = os.path.join(os.path.dirname(__file__), "data", "results.csv")
+TESTSET_PATH   = os.path.join(os.path.dirname(__file__), "data", "testset_1000.csv")
+RESULTS_PATH   = os.path.join(os.path.dirname(__file__), "data", "results.csv")
+CREDENTIALS    = os.path.join(os.path.dirname(__file__), "..", "client_secret_43865832816-letrps5uc0nohpmaug4b5bo6lf2sf92j.apps.googleusercontent.com.json")
+SPREADSHEET_ID = "1KV7gEN-lgxREAWenE4lKyFWi3rfwGpHtYIwHdQtp6Po"
+SHEET_NAME     = "평가결과"   # 시트 탭 이름 (없으면 자동 생성)
 
 RESULT_HEADERS = [
     "id", "url", "category",
@@ -44,7 +49,50 @@ def load_testset(path: str) -> list[dict]:
         return list(csv.DictReader(f))
 
 
-def run_eval(limit: int = None, skip_geval: bool = False):
+def upload_to_sheets(results_path: str):
+    """results.csv 전체를 Google Sheets에 업로드"""
+    try:
+        import gspread
+        from google_auth_oauthlib.flow import InstalledAppFlow
+
+        SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+        # OAuth 인증 (첫 실행 시 브라우저 열림, 이후 token.json 재사용)
+        token_path = os.path.join(os.path.dirname(__file__), "..", "token.json")
+        creds = None
+
+        if os.path.exists(token_path):
+            from google.oauth2.credentials import Credentials
+            creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+
+        if not creds or not creds.valid:
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS, SCOPES)
+            creds = flow.run_local_server(port=0)
+            with open(token_path, "w") as f:
+                f.write(creds.to_json())
+
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SPREADSHEET_ID)
+
+        # 시트 없으면 생성
+        try:
+            ws = sh.worksheet(SHEET_NAME)
+            ws.clear()
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=SHEET_NAME, rows=1100, cols=20)
+
+        # 데이터 로드
+        with open(results_path, encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f))
+
+        ws.update(rows, value_input_option="RAW")
+        print(f"Google Sheets 업로드 완료: {len(rows)-1}건 → '{SHEET_NAME}' 시트")
+
+    except Exception as e:
+        print(f"⚠ Google Sheets 업로드 실패: {e}")
+
+
+def run_eval(limit: int = None, skip_geval: bool = False, skip_sheets: bool = False):
     print("=" * 60)
     print("삼선뉴스 번역·요약 평가 시작")
     print("=" * 60)
@@ -75,17 +123,17 @@ def run_eval(limit: int = None, skip_geval: bool = False):
             ko_gt   = row["ko_text"]
             print(f"[{row['id']}/{len(rows)}] {en_text[:60]}...")
 
-            # ── 1. 번역 + 요약 (Qwen3) ──
+            # ── 1. 번역 + 요약 ──
             try:
                 n = estimate_sentences(en_text)
                 result = translate_and_summarize(en_text, summary_sentences=n)
                 translation    = result.get("translation", "")
                 summary_formal = result.get("summary_formal", "")
             except Exception as e:
-                print(f"  ⚠ Qwen3 오류: {e}")
+                print(f"  ⚠ 모델 오류: {e}")
                 translation = summary_formal = ""
 
-            # ── 2. BLEU (문장 단위) ──
+            # ── 2. BLEU ──
             bleu = calc_bleu_sentence(translation, ko_gt) if translation else 0.0
 
             # ── 3. TPR ──
@@ -93,7 +141,7 @@ def run_eval(limit: int = None, skip_geval: bool = False):
             tpr         = tpr_result["tpr"]
             tpr_missing = "|".join(tpr_result["missing"])
 
-            # ── 4. G-Eval (요약, 옵션) ──
+            # ── 4. G-Eval (옵션) ──
             geval_f = geval_fl = geval_c = geval_avg = 0.0
             if not skip_geval and summary_formal:
                 g = geval_single(en_text, summary_formal)
@@ -101,7 +149,7 @@ def run_eval(limit: int = None, skip_geval: bool = False):
                 geval_fl  = g["fluency"]
                 geval_c   = g["conciseness"]
                 geval_avg = g["average"]
-                time.sleep(0.5)  # Rate Limit 방지
+                time.sleep(0.5)
 
             writer.writerow({
                 "id":                   row["id"],
@@ -120,17 +168,23 @@ def run_eval(limit: int = None, skip_geval: bool = False):
                 "geval_avg":            geval_avg,
                 "n_sentences":          row["n_sentences"],
             })
-            f.flush()  # 중간 저장
+            f.flush()
 
             print(f"  BLEU={bleu:.1f}  TPR={tpr:.2f}  G-Eval={geval_avg:.1f}")
 
     print(f"\n결과 저장 완료: {RESULTS_PATH}")
 
+    # ── 5. Google Sheets 업로드 ──
+    if not skip_sheets:
+        print("\nGoogle Sheets 업로드 중...")
+        upload_to_sheets(RESULTS_PATH)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit",      type=int,  default=None,  help="평가 건수 제한 (테스트용)")
-    parser.add_argument("--skip-geval", action="store_true",      help="G-Eval 건너뛰기")
+    parser.add_argument("--limit",        type=int,            default=None,  help="평가 건수 제한 (테스트용)")
+    parser.add_argument("--skip-geval",   action="store_true",               help="G-Eval 건너뛰기")
+    parser.add_argument("--skip-sheets",  action="store_true",               help="Google Sheets 업로드 건너뛰기")
     args = parser.parse_args()
 
-    run_eval(limit=args.limit, skip_geval=args.skip_geval)
+    run_eval(limit=args.limit, skip_geval=args.skip_geval, skip_sheets=args.skip_sheets)

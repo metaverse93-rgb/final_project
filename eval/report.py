@@ -63,19 +63,20 @@ def generate_report(
     # ── Sheet 1: 번역 평가 ──
     ws1 = wb.active
     ws1.title = "번역 평가"
-    headers1 = ["NO", "카테고리", "원문(EN)", "GT(KO)", "번역 출력", "BLEU", "TPR", "누락 용어"]
+    headers1 = ["NO", "카테고리", "URL", "원문(EN)", "GT(KO)", "번역 출력", "BLEU", "TPR", "누락 용어"]
     style_header(ws1, headers1)
     for ri, row in enumerate(before, 2):
         ws1.cell(ri, 1, row["id"]).font = D_FONT
         ws1.cell(ri, 2, row["category"]).font = D_FONT
-        ws1.cell(ri, 3, row["en_text"]).alignment = WRAP
-        ws1.cell(ri, 4, row["ko_gt"]).alignment = WRAP
-        ws1.cell(ri, 5, row["translation"]).alignment = WRAP
-        ws1.cell(ri, 6, float(row["bleu"] or 0)).font = D_FONT
-        ws1.cell(ri, 7, float(row["tpr"] or 0)).font = D_FONT
-        ws1.cell(ri, 8, row["tpr_missing"]).font = D_FONT
+        ws1.cell(ri, 3, row["url"]).font = D_FONT
+        ws1.cell(ri, 4, row["en_text"]).alignment = WRAP
+        ws1.cell(ri, 5, row["ko_gt"]).alignment = WRAP
+        ws1.cell(ri, 6, row["translation"]).alignment = WRAP
+        ws1.cell(ri, 7, float(row["bleu"] or 0)).font = D_FONT
+        ws1.cell(ri, 8, float(row["tpr"] or 0)).font = D_FONT
+        ws1.cell(ri, 9, row["tpr_missing"]).font = D_FONT
 
-    col_widths1 = [6, 14, 50, 50, 50, 8, 8, 30]
+    col_widths1 = [6, 14, 40, 50, 50, 50, 8, 8, 30]
     for i, w in enumerate(col_widths1, 1):
         ws1.column_dimensions[get_column_letter(i)].width = w
 
