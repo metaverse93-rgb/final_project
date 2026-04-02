@@ -65,6 +65,16 @@ TRAIN_CONFIG = dict(
 
 MAX_SEQ_LEN = 1024   # 최대 토큰 길이
 
+# ── 요약용 시스템 프롬프트 (번역과 분리) ─────────────────────
+SUMMARY_SYSTEM = """You are a professional AI news summarizer.
+Summarize the given English news article into Korean formal style (격식체, ~습니다/~됩니다).
+
+Rules:
+- Summarize in exactly 3 sentences. Each sentence must cover a DIFFERENT aspect.
+- Keep abbreviations like RAG, LLM, GPU, API, NPU in English.
+- Keep ALL proper nouns in English (Anthropic, OpenAI, Google, Meta, Nvidia, etc.).
+- Output ONLY the Korean summary. No explanation, no preamble."""
+
 
 # ══════════════════════════════════════════════════════════
 # 1. 유틸리티
@@ -130,54 +140,71 @@ def load_model_tokenizer(model_id: str, use_4bit: bool = True):
 # 3. 추론 (번역 생성)
 # ══════════════════════════════════════════════════════════
 
+def generate_text(model, tokenizer, messages: list[dict], max_new_tokens: int = 512) -> str:
+    """채팅 메시지 → 모델 출력 텍스트"""
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            temperature=0.3,
+            do_sample=True,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+    new_ids = output_ids[0][inputs["input_ids"].shape[1]:]
+    return tokenizer.decode(new_ids, skip_special_tokens=True).strip()
+
+
 def run_inference(model, tokenizer, test_data: list[dict], out_csv: str):
     """
     testset 전체 추론 → CSV 저장
-    컬럼: id, en_text, ko_gt, translation, bleu, elapsed_sec
+    컬럼: id, en_text, ko_gt, translation, summary_formal, bleu, elapsed_sec
+    번역 + 요약 둘 다 생성하여 파인튜닝 전/후 비교 가능하게 기록
     """
-    headers = ["id", "en_text", "ko_gt", "translation", "bleu", "elapsed_sec"]
+    headers = [
+        "id", "en_text", "ko_gt",
+        "translation", "summary_formal",
+        "bleu", "elapsed_sec",
+    ]
     init_csv(out_csv, headers)
 
     model.eval()
     total = len(test_data)
 
     for i, item in enumerate(test_data, 1):
-        messages = item["messages"]
-        en_text  = messages[1]["content"]   # user 역할 = 영어 원문
-        ko_gt    = messages[2]["content"]   # assistant 역할 = 한국어 GT
-
-        # 채팅 템플릿 적용
-        prompt = tokenizer.apply_chat_template(
-            messages[:-1],   # system + user 만 입력 (assistant 제외)
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        messages  = item["messages"]
+        en_text   = messages[1]["content"]   # user 역할 = 영어 원문
+        ko_gt     = messages[2]["content"]   # assistant 역할 = 한국어 GT (번역)
 
         t0 = time.time()
-        with torch.no_grad():
-            output_ids = model.generate(
-                **inputs,
-                max_new_tokens=512,
-                temperature=0.3,
-                do_sample=True,
-                pad_token_id=tokenizer.eos_token_id,
-            )
+
+        # ── 번역 생성 ──
+        trans_messages = messages[:-1]   # system(번역) + user
+        translation = generate_text(model, tokenizer, trans_messages)
+
+        # ── 요약 생성 (격식체, 별도 시스템 프롬프트) ──
+        summary_messages = [
+            {"role": "system", "content": SUMMARY_SYSTEM},
+            {"role": "user",   "content": en_text},
+        ]
+        summary_formal = generate_text(model, tokenizer, summary_messages, max_new_tokens=256)
+
         elapsed = round(time.time() - t0, 2)
-
-        # 생성된 부분만 추출
-        new_ids = output_ids[0][inputs["input_ids"].shape[1]:]
-        translation = tokenizer.decode(new_ids, skip_special_tokens=True).strip()
-
-        bleu = calc_bleu(translation, ko_gt)
+        bleu    = calc_bleu(translation, ko_gt)
 
         row = {
-            "id":           i,
-            "en_text":      en_text[:500],
-            "ko_gt":        ko_gt[:500],
-            "translation":  translation[:500],
-            "bleu":         bleu,
-            "elapsed_sec":  elapsed,
+            "id":             i,
+            "en_text":        en_text[:500],
+            "ko_gt":          ko_gt[:500],
+            "translation":    translation[:500],
+            "summary_formal": summary_formal[:300],
+            "bleu":           bleu,
+            "elapsed_sec":    elapsed,
         }
         append_csv(out_csv, row)
 
