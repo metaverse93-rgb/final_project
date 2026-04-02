@@ -68,9 +68,9 @@ def generate_report(
     for ri, row in enumerate(before, 2):
         ws1.cell(ri, 1, row["id"]).font = D_FONT
         ws1.cell(ri, 2, row["category"]).font = D_FONT
-        ws1.cell(ri, 3, row["en_text"][:300]).alignment = WRAP
-        ws1.cell(ri, 4, row["ko_gt"][:300]).alignment = WRAP
-        ws1.cell(ri, 5, row["translation"][:300]).alignment = WRAP
+        ws1.cell(ri, 3, row["en_text"]).alignment = WRAP
+        ws1.cell(ri, 4, row["ko_gt"]).alignment = WRAP
+        ws1.cell(ri, 5, row["translation"]).alignment = WRAP
         ws1.cell(ri, 6, float(row["bleu"] or 0)).font = D_FONT
         ws1.cell(ri, 7, float(row["tpr"] or 0)).font = D_FONT
         ws1.cell(ri, 8, row["tpr_missing"]).font = D_FONT
@@ -86,8 +86,8 @@ def generate_report(
     for ri, row in enumerate(before, 2):
         ws2.cell(ri, 1, row["id"]).font = D_FONT
         ws2.cell(ri, 2, row["category"]).font = D_FONT
-        ws2.cell(ri, 3, row["en_text"][:300]).alignment = WRAP
-        ws2.cell(ri, 4, row["summary_formal"][:300]).alignment = WRAP
+        ws2.cell(ri, 3, row["en_text"]).alignment = WRAP
+        ws2.cell(ri, 4, row["summary_formal"]).alignment = WRAP
         ws2.cell(ri, 5, int(float(row["geval_faithfulness"] or 0))).font = D_FONT
         ws2.cell(ri, 6, int(float(row["geval_fluency"] or 0))).font = D_FONT
         ws2.cell(ri, 7, int(float(row["geval_conciseness"] or 0))).font = D_FONT
