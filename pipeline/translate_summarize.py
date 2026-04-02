@@ -11,6 +11,7 @@ Usage:
 """
 
 import json
+import re
 import sys
 import ollama
 from dotenv import load_dotenv
@@ -32,12 +33,36 @@ Given a news article, produce ALL three outputs at once:
 
 Rules:
 - Keep abbreviations like RAG, LLM, GPU, API, NPU in English.
+- CRITICAL: Keep ALL proper nouns in English exactly as written. NEVER transliterate them into Korean or Chinese characters.
+  Examples: Anthropic→Anthropic (NOT 앤트로피크), OpenAI→OpenAI (NOT 오픈에이아이), Google→Google, Meta→Meta, Nvidia→Nvidia, Slack→Slack, Alexa→Alexa, ChatGPT→ChatGPT, Gemini→Gemini, Llama→Llama.
+  # 고유명사 처리 규칙: 회사명·브랜드명·신조어는 영문 그대로 유지.
+  # 음차(앤트로피크, 오픈에이아이 등)하면 가독성이 떨어지고 검색도 안 되므로 영문 유지가 원칙.
+  # AI 신조어(Blackwell Ultra, LoRA 등)도 동일 — 첫 등장 시 영문(한국어 설명) 형식 병기.
+- CRITICAL: Output Korean text only. Do NOT use any Chinese characters (漢字) in the output.
 - Transliterate technical terms: Fine-tuning→파인튜닝, Embedding→임베딩, Prompt→프롬프트.
-- For new proper nouns, use: OriginalTerm(한국어, brief explanation) on first mention.
+- For NEW coinages not yet widely known, use: OriginalTerm(한국어, brief explanation) on first mention.
 - Summaries must NOT copy translation word-for-word.
 - Output ONLY valid JSON. No explanation, no preamble."""
 
 PREFILL = '{"translation": "'
+
+
+# ────────────────────────────────────────────────
+# Sentence Estimator
+# ────────────────────────────────────────────────
+def estimate_sentences(text: str, max_sentences: int = 3) -> int:
+    """
+    원문 문장 수를 추정해 summary_sentences 상한을 반환합니다.
+
+    약어(A.I., G.P.T.) · URL · 소수점의 마침표 오탐을 줄이기 위해
+    '2글자 이상 단어 뒤의 문장 종결 부호(.!?) + 공백' 패턴만 카운트합니다.
+
+    Returns:
+        min(추정 문장 수, max_sentences)
+        — 원문보다 많은 줄을 요약하도록 강제하지 않기 위해 상한을 둠.
+    """
+    parts = re.split(r'(?<=[a-zA-Z]{2})[.!?]\s+', text.strip())
+    return min(max(1, len(parts)), max_sentences)
 
 
 # ────────────────────────────────────────────────

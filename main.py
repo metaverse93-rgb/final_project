@@ -6,7 +6,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'RSS'))
 
 from crawler.rss_crawler import fetch_all
-from pipeline.translate_summarize import translate_and_summarize
+from pipeline.translate_summarize import translate_and_summarize, estimate_sentences
 
 
 def run_pipeline(max_articles: int = 10, summary_sentences: int = 3):
@@ -28,10 +28,9 @@ def run_pipeline(max_articles: int = 10, summary_sentences: int = 3):
     for i, article in enumerate(articles, 1):
         print(f"\n[{i}/{len(articles)}] [{article.source}] {article.title[:60]}...")
         try:
-            processed = translate_and_summarize(
-                article.content or article.title,
-                summary_sentences=summary_sentences,
-            )
+            text = article.content or article.title
+            n = estimate_sentences(text, max_sentences=summary_sentences)
+            processed = translate_and_summarize(text, summary_sentences=n)
             result = {
                 "source":            article.source,
                 "source_type":       article.source_type,
