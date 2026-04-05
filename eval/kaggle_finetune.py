@@ -1,5 +1,5 @@
 """
-Qwen3.5-4B QLoRA 파인튜닝 — Kaggle P100 (16GB)
+Qwen3.5-4B QLoRA 파인튜닝 — Kaggle T4 (15GB)
 ======================================================
 세션 분리 실행 (Kaggle 12시간 제한 대응):
 
@@ -66,18 +66,18 @@ SESSION_EPOCHS = {
 TRAIN_CONFIG = dict(
     per_device_train_batch_size=1,
     gradient_accumulation_steps=16,   # 유효 배치 = 16
-    learning_rate=2e-4,
+    learning_rate=1e-4,
     lr_scheduler_type="cosine",
     warmup_ratio=0.05,
     fp16=False,
     logging_steps=50,
-    save_steps=300,          # 자주 저장 (세션 끊김 대비)
+    save_steps=50,           # 50 step마다 저장
     save_total_limit=3,
     output_dir=CKPT_DIR,
     report_to="none",
 )
 
-MAX_SEQ_LEN = 1024
+MAX_SEQ_LEN = 512
 
 SUMMARY_SYSTEM = """You are a professional AI news summarizer.
 Summarize the given English news article into Korean formal style (격식체, ~습니다/~됩니다).
@@ -263,7 +263,7 @@ def finetune(model, tokenizer, train_data: list[dict], num_epochs: int, resume: 
 
     print(f"\n[파인튜닝] epochs={num_epochs}, resume={resume}")
 
-    model = prepare_model_for_kbit_training(model)
+    model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=False)
     # BFloat16 파라미터 강제 fp16 변환 (AMP 충돌 방지)
     for param in model.parameters():
         if param.dtype == torch.bfloat16:
@@ -320,14 +320,25 @@ def finetune(model, tokenizer, train_data: list[dict], num_epochs: int, resume: 
 # 5. 세션별 실행
 # ══════════════════════════════════════════════════════════
 
+AI_KEYWORDS = ["AI", "LLM", "GPT", "model", "neural", "Anthropic",
+               "OpenAI", "Google", "Meta", "Nvidia", "machine learning"]
+
+def sort_ai_first(data: list[dict]) -> list[dict]:
+    ai_data    = [d for d in data if any(k in d["messages"][1]["content"] for k in AI_KEYWORDS)]
+    other_data = [d for d in data if d not in ai_data]
+    return ai_data + other_data
+
+
 def session_1():
-    """Session 1 — epoch 1 학습 (8~10시간 예상)"""
+    """Session 1 — epoch 1 학습"""
     print("=" * 60)
     print("SESSION 1: epoch 1 학습 시작")
     print("=" * 60)
 
-    train_data = load_jsonl(TRAIN_JSONL)
-    print(f"trainset: {len(train_data)}건\n")
+    all_data   = load_jsonl(TRAIN_JSONL)
+    train_data = sort_ai_first(all_data)
+    ai_count   = sum(1 for d in train_data if any(k in d["messages"][1]["content"] for k in AI_KEYWORDS))
+    print(f"trainset: {len(train_data)}건 (AI테크: {ai_count}건 / 기타: {len(train_data)-ai_count}건)\n")
 
     model, tokenizer = load_base_model(MODEL_ID)
     finetune(model, tokenizer, train_data, num_epochs=1, resume=False)
@@ -348,8 +359,10 @@ def session_2():
         return
 
     print(f"이어받을 체크포인트: {ckpt}")
-    train_data = load_jsonl(TRAIN_JSONL)
-    print(f"trainset: {len(train_data)}건\n")
+    all_data   = load_jsonl(TRAIN_JSONL)
+    train_data = sort_ai_first(all_data)
+    ai_count   = sum(1 for d in train_data if any(k in d["messages"][1]["content"] for k in AI_KEYWORDS))
+    print(f"trainset: {len(train_data)}건 (AI테크: {ai_count}건 / 기타: {len(train_data)-ai_count}건)\n")
 
     model, tokenizer = load_base_model(MODEL_ID)
     finetune(model, tokenizer, train_data, num_epochs=3, resume=True)
