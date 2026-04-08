@@ -26,12 +26,14 @@ AI_TERMS = [
 ]
 
 
-def check_term_preservation(translation: str, terms: list[str] = None) -> dict:
+def check_term_preservation(translation: str, source: str = "", terms: list[str] = None) -> dict:
     """
     번역 출력에서 AI 용어 영문 보존 여부 체크.
 
     Args:
         translation : 모델 번역 출력 텍스트
+        source      : 원본 영어 텍스트 (용어 등장 여부 판단 기준)
+                      없으면 translation에서 찾는 방식으로 fallback (비권장)
         terms       : 체크할 용어 리스트 (기본: AI_TERMS)
 
     Returns:
@@ -39,14 +41,16 @@ def check_term_preservation(translation: str, terms: list[str] = None) -> dict:
             "tpr": float,           # Term Preservation Rate (0.0~1.0)
             "preserved": list,      # 보존된 용어
             "missing": list,        # 누락된 용어 (번역됨)
-            "checked": list,        # 원문에 등장했어야 할 용어
+            "checked": list,        # 원문에 등장한 용어 (체크 대상)
         }
     """
     if terms is None:
         terms = AI_TERMS
 
-    # 원문에 등장하는 용어만 체크 (없는 건 평가 제외)
-    checked  = [t for t in terms if t.lower() in translation.lower() or t in translation]
+    # 원문(source)에 등장하는 용어만 체크 대상으로 선정
+    # source가 없으면 translation에서 fallback (TPR 과대평가 주의)
+    base = source if source else translation
+    checked   = [t for t in terms if t.lower() in base.lower()]
     preserved = [t for t in checked if t in translation]
     missing   = [t for t in checked if t not in translation]
 
@@ -67,7 +71,7 @@ def batch_tpr(translations: list[str], terms: list[str] = None) -> dict:
     Returns:
         {"tpr_mean": float, "scores": list[float]}
     """
-    scores = [check_term_preservation(t, terms)["tpr"] for t in translations]
+    scores = [check_term_preservation(t, terms=terms)["tpr"] for t in translations]
     tpr_mean = sum(scores) / len(scores) if scores else 0.0
 
     return {

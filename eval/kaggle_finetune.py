@@ -1,6 +1,10 @@
 """
-Qwen3.5-4B QLoRA 파인튜닝 — Kaggle T4 (15GB)
+Qwen3.5-4B LoRA 파인튜닝 — Kaggle P100 (16GB)
 ======================================================
+QLoRA(4bit) → LoRA(bf16) 변경: Unsloth 공식 권고사항 반영
+  "It is not recommended to do QLoRA (4-bit) training on the Qwen3.5 models
+   due to higher than normal quantization differences."
+
 세션 분리 실행 (Kaggle 12시간 제한 대응):
 
   SESSION = 1  →  epoch 1 학습 (8~10시간 예상)
@@ -8,7 +12,8 @@ Qwen3.5-4B QLoRA 파인튜닝 — Kaggle T4 (15GB)
   SESSION = 3  →  파인튜닝 후 추론 + BLEU 비교 (2~3시간 예상)
 
 Kaggle 셀 상단에 실행:
-    !pip install -q transformers peft trl bitsandbytes datasets sacrebleu accelerate
+    !pip install --upgrade --force-reinstall --no-cache-dir unsloth unsloth_zoo
+    !pip install transformers==5.2.0 trl==0.22.2 datasets sacrebleu accelerate
 
 업로드할 Kaggle Dataset (이름: samseon-dataset):
     trainset_chat.jsonl
@@ -41,26 +46,27 @@ OUTPUT_DIR  = os.path.join(BASE_DIR, "qwen3_5-finetuned")
 CKPT_DIR    = os.path.join(BASE_DIR, "checkpoints")   # 세션 간 체크포인트
 
 # ── 체크포인트 전달 설정 ──────────────────────────────────
-# Session 1 종료 후 /kaggle/working/checkpoint_transfer.zip 으로 저장됨
-# 다른 사람이 이어받을 때: zip을 Kaggle Dataset으로 업로드한 뒤 아래 경로 지정
-CKPT_ZIP_OUT  = os.path.join(BASE_DIR, "checkpoint_transfer.zip")  # 저장 경로 (수정 불필요)
-CKPT_ZIP_IN   = "/kaggle/input/samseon-checkpoint/checkpoint_transfer.zip"  # 이어받을 때 zip 경로
+CKPT_ZIP_OUT  = os.path.join(BASE_DIR, "checkpoint_transfer.zip")
+CKPT_ZIP_IN   = "/kaggle/input/samseon-checkpoint/checkpoint_transfer.zip"
 
 # 결과 파일
 AFTER_CSV    = os.path.join(BASE_DIR, "after_results.csv")
 TRAINING_LOG = os.path.join(BASE_DIR, "training_log.csv")
 
-# ── QLoRA 하이퍼파라미터 ──────────────────────────────────
+# ── LoRA 하이퍼파라미터 (bf16, QLoRA 아님) ────────────────
+# lora_alpha == r 권장 (Unsloth 가이드)
+# lora_dropout = 0 권장 (Unsloth 가이드)
 LORA_CONFIG = dict(
     r=16,
-    lora_alpha=32,
+    lora_alpha=16,
     target_modules=[
         "q_proj", "k_proj", "v_proj", "o_proj",
         "gate_proj", "up_proj", "down_proj",
     ],
-    lora_dropout=0.05,
+    lora_dropout=0,
     bias="none",
-    task_type="CAUSAL_LM",
+    use_gradient_checkpointing="unsloth",  # VRAM 절약 + 긴 context 지원
+    random_state=3407,
 )
 
 # 세션별 epoch 설정
@@ -75,12 +81,15 @@ TRAIN_CONFIG = dict(
     learning_rate=1e-4,
     lr_scheduler_type="cosine",
     warmup_ratio=0.05,
+    bf16=True,         # bf16 LoRA (P100은 fp16만 지원 → fp16=True로 변경 가능)
     fp16=False,
     logging_steps=50,
-    save_steps=50,           # 50 step마다 저장
+    save_steps=50,
     save_total_limit=3,
     output_dir=CKPT_DIR,
     report_to="none",
+    optim="adamw_8bit",
+    seed=3407,
 )
 
 MAX_SEQ_LEN = 512
@@ -105,8 +114,17 @@ def load_jsonl(path: str) -> list[dict]:
 
 
 def strip_think(text: str) -> str:
-    """Qwen3 <think>...</think> 태그 제거"""
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    """LLM 출력 전처리 — think 태그, 마크다운, 스마트따옴표, 제어문자 제거"""
+    import re as _re
+    if "</think>" in text:
+        text = text.split("</think>")[-1]
+    text = _re.sub(r"```json\s*", "", text)
+    text = _re.sub(r"```\s*", "", text)
+    text = (text
+            .replace('\u201c', '"').replace('\u201d', '"')
+            .replace('\u2018', "'").replace('\u2019', "'"))
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    text = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
     return text.strip()
 
 
@@ -142,9 +160,7 @@ def find_latest_checkpoint(ckpt_dir: str):
 
 
 def export_checkpoint(zip_out: str = CKPT_ZIP_OUT):
-    """체크포인트 디렉터리 → zip 압축 (다른 사람에게 전달용)
-    Kaggle Output 탭에서 checkpoint_transfer.zip 다운로드 가능
-    """
+    """체크포인트 디렉터리 → zip 압축"""
     import zipfile
     if not os.path.exists(CKPT_DIR):
         print("[export] 체크포인트 없음 — 먼저 학습을 실행하세요.")
@@ -164,9 +180,7 @@ def export_checkpoint(zip_out: str = CKPT_ZIP_OUT):
 
 
 def import_checkpoint(zip_in: str = CKPT_ZIP_IN):
-    """zip → 체크포인트 디렉터리 복원 (전달받은 파일로 이어받기)
-    사용법: zip을 Kaggle Dataset으로 업로드 → CKPT_ZIP_IN 경로 맞추기
-    """
+    """zip → 체크포인트 디렉터리 복원"""
     import zipfile
     if not os.path.exists(zip_in):
         print(f"[import] zip 파일 없음: {zip_in}")
@@ -188,48 +202,40 @@ def import_checkpoint(zip_in: str = CKPT_ZIP_IN):
 
 
 # ══════════════════════════════════════════════════════════
-# 2. 모델 로드
+# 2. 모델 로드 (Unsloth FastLanguageModel, bf16 LoRA)
 # ══════════════════════════════════════════════════════════
 
 def load_base_model(model_id: str):
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    """베이스 모델 로드 — bf16 LoRA (QLoRA 아님)
+    Qwen3.5 4B bf16 LoRA VRAM 사용량: ~10GB (P100 16GB에서 여유 있음)
+    """
+    from unsloth import FastLanguageModel
 
-    print(f"[모델 로드] {model_id}")
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    print(f"[모델 로드] {model_id} (bf16 LoRA)")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=model_id,
+        max_seq_length=MAX_SEQ_LEN,
+        load_in_4bit=False,   # QLoRA 비활성화
+        load_in_16bit=True,   # bf16 LoRA
+        full_finetuning=False,
+    )
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
-
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
-        bnb_4bit_use_double_quant=True,
-    )
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        quantization_config=bnb_config,
-        device_map="auto",
-        trust_remote_code=True,
-        torch_dtype=torch.float16,
-    )
-    model.config.use_cache = False
     return model, tokenizer
 
 
 def load_finetuned_model(model_dir: str):
     """파인튜닝 완료 모델 로드 (Session 3용)"""
-    from transformers import AutoTokenizer
-    from peft import AutoPeftModelForCausalLM
+    from unsloth import FastLanguageModel
 
     print(f"[파인튜닝 모델 로드] {model_dir}")
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
-    model = AutoPeftModelForCausalLM.from_pretrained(
-        model_dir,
-        device_map="auto",
-        torch_dtype=torch.float16,
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=model_dir,
+        max_seq_length=MAX_SEQ_LEN,
+        load_in_4bit=False,
+        load_in_16bit=True,
     )
-    model.eval()
+    FastLanguageModel.for_inference(model)
     return model, tokenizer
 
 
@@ -254,11 +260,14 @@ def generate_text(model, tokenizer, messages: list[dict], max_new_tokens: int = 
         )
     new_ids = output_ids[0][inputs["input_ids"].shape[1]:]
     raw = tokenizer.decode(new_ids, skip_special_tokens=True)
-    return strip_think(raw)   # think 태그 제거
+    return strip_think(raw)
 
 
 def run_inference(model, tokenizer, test_data: list[dict], out_csv: str):
     """testset 전체 추론 → CSV 저장"""
+    from unsloth import FastLanguageModel
+    FastLanguageModel.for_inference(model)
+
     headers = ["id", "en_text", "ko_gt", "translation", "summary_formal", "bleu", "elapsed_sec"]
     init_csv(out_csv, headers)
 
@@ -304,32 +313,32 @@ def run_inference(model, tokenizer, test_data: list[dict], out_csv: str):
 
 
 # ══════════════════════════════════════════════════════════
-# 4. 파인튜닝
+# 4. 파인튜닝 (Unsloth LoRA)
 # ══════════════════════════════════════════════════════════
 
 def finetune(model, tokenizer, train_data: list[dict], num_epochs: int, resume: bool = False):
-    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    from unsloth import FastLanguageModel
     from trl import SFTTrainer, SFTConfig
     from transformers import TrainerCallback
     from datasets import Dataset
 
     print(f"\n[파인튜닝] epochs={num_epochs}, resume={resume}")
 
-    model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=False)
-    # BFloat16 파라미터 강제 fp16 변환 (AMP 충돌 방지)
-    for param in model.parameters():
-        if param.dtype == torch.bfloat16:
-            param.data = param.data.to(torch.float16)
-    lora_config = LoraConfig(**LORA_CONFIG)
-    model = get_peft_model(model, lora_config)
+    # LoRA 어댑터 부착 (Unsloth 방식 — prepare_model_for_kbit_training 불필요)
+    model = FastLanguageModel.get_peft_model(
+        model,
+        **LORA_CONFIG,
+        max_seq_length=MAX_SEQ_LEN,
+    )
     model.print_trainable_parameters()
+
+    FastLanguageModel.for_training(model)
 
     formatted = [{"text": tokenizer.apply_chat_template(
         item["messages"], tokenize=False, add_generation_prompt=False
     )} for item in train_data]
     dataset = Dataset.from_list(formatted)
 
-    # 학습 로그 콜백
     class CsvLogCallback(TrainerCallback):
         def on_log(self, args, state, control, logs=None, **kwargs):
             if logs and "loss" in logs:
@@ -344,8 +353,7 @@ def finetune(model, tokenizer, train_data: list[dict], num_epochs: int, resume: 
     if not resume:
         init_csv(TRAINING_LOG, ["step", "loss", "learning_rate", "epoch", "timestamp"])
 
-    tokenizer.model_max_length = MAX_SEQ_LEN
-    config = {**TRAIN_CONFIG, "num_train_epochs": num_epochs}
+    config = {**TRAIN_CONFIG, "num_train_epochs": num_epochs, "max_seq_length": MAX_SEQ_LEN}
     sft_config = SFTConfig(**config)
 
     trainer = SFTTrainer(
@@ -356,7 +364,6 @@ def finetune(model, tokenizer, train_data: list[dict], num_epochs: int, resume: 
         callbacks=[CsvLogCallback()],
     )
 
-    # 체크포인트 이어받기
     checkpoint = find_latest_checkpoint(CKPT_DIR) if resume else None
     if checkpoint:
         print(f"체크포인트 이어받기: {checkpoint}")
@@ -384,7 +391,7 @@ def sort_ai_first(data: list[dict]) -> list[dict]:
 def session_1():
     """Session 1 — epoch 1 학습"""
     print("=" * 60)
-    print("SESSION 1: epoch 1 학습 시작")
+    print("SESSION 1: epoch 1 학습 시작 (bf16 LoRA)")
     print("=" * 60)
 
     all_data   = load_jsonl(TRAIN_JSONL)
@@ -398,16 +405,14 @@ def session_1():
     print("\nSession 1 완료. 체크포인트 저장됨.")
     export_checkpoint()
     print(f"다음 세션: SESSION = 2 로 변경 후 실행")
-    print(f"다른 사람이 이어받을 경우: checkpoint_transfer.zip 다운로드 후 Kaggle Dataset 업로드")
 
 
 def session_2():
-    """Session 2 — epoch 2~3 이어받기 (8~10시간 예상)"""
+    """Session 2 — epoch 2~3 이어받기"""
     print("=" * 60)
-    print("SESSION 2: epoch 2~3 이어받기 학습")
+    print("SESSION 2: epoch 2~3 이어받기 학습 (bf16 LoRA)")
     print("=" * 60)
 
-    # 로컬 체크포인트 없으면 zip에서 복원 시도
     ckpt = find_latest_checkpoint(CKPT_DIR)
     if not ckpt:
         print("로컬 체크포인트 없음 — zip에서 복원 시도...")
@@ -430,7 +435,7 @@ def session_2():
 
 
 def session_3():
-    """Session 3 — 파인튜닝 후 추론 + BLEU 비교 (2~3시간 예상)"""
+    """Session 3 — 파인튜닝 후 추론 + BLEU 비교"""
     print("=" * 60)
     print("SESSION 3: 파인튜닝 후 추론 및 평가")
     print("=" * 60)
@@ -445,7 +450,6 @@ def session_3():
     model, tokenizer = load_finetuned_model(OUTPUT_DIR)
     run_inference(model, tokenizer, test_data, AFTER_CSV)
 
-    # BLEU 비교 출력
     with open(AFTER_CSV, encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
     after_bleu = sum(float(r["bleu"]) for r in rows if r["bleu"]) / len(rows)
@@ -465,7 +469,8 @@ def session_3():
 
 if __name__ == "__main__":
     print(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
-    print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB\n" if torch.cuda.is_available() else "")
+    if torch.cuda.is_available():
+        print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB\n")
 
     if SESSION == 1:
         session_1()

@@ -10,12 +10,12 @@ Usage:
   python pipeline/translate_summarize.py
 """
 
-import json
 import re
 import sys
 import ollama
 from dotenv import load_dotenv
 import os
+from pipeline.utils import preprocess_text, extract_json as _extract_json_util
 
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -24,24 +24,55 @@ load_dotenv()
 
 MODEL = os.getenv("MODEL_NAME", "qwen3.5:4b")
 
-SYSTEM_PROMPT = """You are a professional AI news translator and summarizer.
-Given a news article, produce ALL three outputs at once:
+SYSTEM_PROMPT = """You are a professional Korean translator and summarizer.
 
-1. **translation**: Translate the ENTIRE text into natural Korean.
-2. **summary_formal**: Summarize in exactly {n} sentence(s) in formal Korean (격식체, ~습니다/~됩니다). Key points only.
-3. **summary_casual**: Summarize in exactly {n} sentence(s) in casual Korean (일상체, ~해요/~예요/~거예요). Key points only.
+━━━ RULE 0: OUTPUT LANGUAGE (ABSOLUTE PRIORITY) ━━━
+Output MUST contain ONLY Korean (한글) + Latin (A-Z/a-z) + digits + punctuation.
+ZERO TOLERANCE — even one character from the following scripts causes failure:
+  • Chinese/Hanzi (漢字): including 去, 年, 的, 在 etc.
+  • Cyrillic/Russian: А, Б, В … я etc.
+  • Thai, Arabic, Hebrew, Japanese kana
+If the source contains these scripts, translate or romanize them into Korean. NEVER copy them.
 
-Rules:
-- Keep abbreviations like RAG, LLM, GPU, API, NPU in English only (no Korean).
-- CRITICAL: For ALL proper nouns (company names, product names, people), use the format: English(한국어 음차) — English FIRST, Korean in parentheses. Apply on first mention only, English only after that.
-  # 고유명사 병기 규칙: 반드시 영문을 앞에, 한국어 음차를 괄호 안에. 첫 등장 시에만 병기, 이후에는 영문만.
-  Examples: Anthropic(앤트로픽), OpenAI(오픈에이아이), Google(구글), Meta(메타), Nvidia(엔비디아), Slack(슬랙), Alexa(알렉사), ChatGPT(챗지피티), Gemini(제미나이), Llama(라마).
-- CRITICAL: Output Korean text only. Do NOT use any Chinese characters (漢字) in the output.
-- Transliterate technical terms: Fine-tuning→파인튜닝, Embedding→임베딩, Prompt→프롬프트.
-- For NEW coinages not yet widely known, use: OriginalTerm(한국어 음차, brief explanation) on first mention.
-  # 신조어 처리: 첫 등장 시 영문(한국어 음차, 설명) 형식. 예) Blackwell Ultra(블랙웰 울트라, Nvidia 차세대 GPU)
-- Summaries must NOT copy translation word-for-word.
-- Output ONLY valid JSON. No explanation, no preamble."""
+━━━ OUTPUT FORMAT ━━━
+Return ONLY valid JSON. No markdown fences, no explanation outside JSON.
+{{
+  "translation": "<전체 한국어 번역>",
+  "summary_formal": "<격식체 요약>",
+  "summary_casual": "<일상체 요약>"
+}}
+All three fields are REQUIRED. Never leave any field empty.
+
+━━━ TRANSLATION RULES ━━━
+1. Translate the ENTIRE article into Korean.
+2. Keep these abbreviations in English exactly as-is: RAG, LLM, GPU, NPU, API, RLHF, SFT, LoRA, QLoRA, P2P, B2B, SNS.
+3. Standard tech transliterations (use exactly these):
+   Fine-tuning→파인튜닝 / Embedding→임베딩 / Prompt→프롬프트 / Transformer→트랜스포머
+   Startup→스타트업 / Platform→플랫폼 / Algorithm→알고리즘
+
+4. PROPER NOUN FORMAT — applies ONLY to English/Western company names, product names, and brand names.
+   • Rule: EnglishName(한국어 음차) on FIRST mention only. EnglishName alone after that.
+   • Standard glossary (use exactly these Korean forms):
+     Anthropic(앤트로픽) / OpenAI(오픈에이아이) / Google(구글) / Meta(메타) / Microsoft(마이크로소프트)
+     Nvidia(엔비디아) / Apple(애플) / Amazon(아마존) / Samsung(삼성) / Intel(인텔)
+     ChatGPT(챗GPT) / Gemini(제미나이) / Llama(라마) / Grok(그록) / Copilot(코파일럿)
+     Huawei(화웨이) / Xiaomi(샤오미) / Tencent(텐센트) / Alibaba(알리바바) / ByteDance(바이트댄스)
+     Tesla(테슬라) / SpaceX(스페이스X) / DeepMind(딥마인드) / xAI(xAI)
+   • For names NOT in the glossary: use the most widely recognized Korean transliteration.
+
+5. DO NOT apply the English(한국어) format to:
+   • Korean person names (홍길동, 이재용 etc.) — write in Korean only, no parentheses
+   • Korean company/institution names (삼성전자, 국가정보원, 한국철도공사 etc.) — Korean only
+   • Already-Korean loanwords (디즈니, 마그네틱, 인터넷 etc.) — no duplication
+
+6. New English coinages not in the glossary: EnglishTerm(한국어 음차, 한 줄 설명) on first mention.
+   Example: Blackwell Ultra(블랙웰 울트라, Nvidia 차세대 GPU 아키텍처)
+
+━━━ SUMMARY RULES ━━━
+- summary_formal: exactly {n} Korean sentence(s), 격식체 (~습니다/~됩니다). Must be complete.
+- summary_casual: exactly {n} Korean sentence(s), 일상체 (~해요/~예요/~거예요). Must be complete.
+- Summaries must NOT copy translation sentences verbatim — paraphrase.
+- Apply all language and proper noun rules above."""
 
 
 # ────────────────────────────────────────────────
@@ -96,7 +127,7 @@ def translate_and_summarize(
             ],
             options={
                 "temperature": 0.1,
-                "num_predict": 3000,
+                "num_predict": -1,   # 무제한 — EOS 토큰까지 생성
                 "num_gpu": 99,
             },
             think=False,  # thinking 모드 비활성화 (qwen3.5:4b 전용)
@@ -109,48 +140,8 @@ def translate_and_summarize(
 
 
 def _extract_json(text: str) -> dict:
-    """LLM 응답에서 첫 번째 완전한 JSON 객체를 추출합니다."""
-    text = text.strip()
-
-    if "</think>" in text:
-        text = text.split("</think>")[-1].strip()
-
-    # 1차: { 위치 순차 탐색으로 완전한 JSON 파싱 시도
-    pos = 0
-    while True:
-        start = text.find("{", pos)
-        if start == -1:
-            break
-        try:
-            obj, _ = json.JSONDecoder().raw_decode(text, start)
-            if "translation" in obj:
-                return obj
-        except json.JSONDecodeError:
-            pass
-        pos = start + 1
-
-    # 2차: regex로 각 필드 개별 추출 (JSON 구조 손상 시 최후 수단)
-    def extract_field(key: str) -> str:
-        pattern = rf'"{key}"\s*:\s*"((?:[^"\\]|\\.)*)"'
-        m = re.search(pattern, text, re.DOTALL)
-        return m.group(1).replace("\\n", "\n").replace('\\"', '"') if m else ""
-
-    translation    = extract_field("translation")
-    summary_formal = extract_field("summary_formal")
-    summary_casual = extract_field("summary_casual")
-
-    if translation:
-        return {
-            "translation":    translation,
-            "summary_formal": summary_formal or "(파싱 실패)",
-            "summary_casual": summary_casual or "(파싱 실패)",
-        }
-
-    return {
-        "translation":    text,
-        "summary_formal": "(파싱 실패)",
-        "summary_casual": "(파싱 실패)",
-    }
+    """pipeline.utils.extract_json 위임 (하위 호환용 래퍼)"""
+    return _extract_json_util(text)
 
 
 # ────────────────────────────────────────────────

@@ -28,8 +28,8 @@ from eval.metrics.bleu_comet import calc_bleu_sentence, load_comet_model, calc_c
 from eval.metrics.term_preservation import check_term_preservation
 from eval.metrics.geval import geval_single
 
-TESTSET_PATH   = os.path.join(os.path.dirname(__file__), "data", "testset_1000.csv")
-RESULTS_PATH   = os.path.join(os.path.dirname(__file__), "data", "results.csv")
+TESTSET_PATH   = os.path.join(os.path.dirname(__file__), "data", "testset_300.csv")
+RESULTS_PATH   = os.path.join(os.path.dirname(__file__), "data", "results_300.csv")
 CREDENTIALS    = os.path.join(os.path.dirname(__file__), "..", "client_secret_43865832816-letrps5uc0nohpmaug4b5bo6lf2sf92j.apps.googleusercontent.com.json")
 SPREADSHEET_ID = "1KV7gEN-lgxREAWenE4lKyFWi3rfwGpHtYIwHdQtp6Po"
 SHEET_NAME     = "평가결과"   # 시트 탭 이름 (없으면 자동 생성)
@@ -39,7 +39,7 @@ RESULT_HEADERS = [
     "en_text", "ko_gt",
     "translation", "summary_formal",
     "bleu", "comet", "tpr", "tpr_missing",
-    "geval_faithfulness", "geval_fluency", "geval_conciseness", "geval_avg",
+    "geval_faithfulness", "geval_fluency", "geval_conciseness", "geval_relevance", "geval_avg", "geval_weighted",
     "n_sentences",
 ]
 
@@ -150,18 +150,20 @@ def run_eval(limit: int = None, skip_geval: bool = False, skip_comet: bool = Fal
                 comet_score = c["comet_mean"]
 
             # ── 4. TPR ──
-            tpr_result  = check_term_preservation(translation)
+            tpr_result  = check_term_preservation(translation, source=en_text)
             tpr         = tpr_result["tpr"]
             tpr_missing = "|".join(tpr_result["missing"])
 
             # ── 5. G-Eval (옵션) ──
-            geval_f = geval_fl = geval_c = geval_avg = 0.0
+            geval_f = geval_fl = geval_c = geval_r = geval_avg = geval_weighted = 0.0
             if not skip_geval and summary_formal:
-                g = geval_single(en_text, summary_formal)
-                geval_f   = g["faithfulness"]
-                geval_fl  = g["fluency"]
-                geval_c   = g["conciseness"]
-                geval_avg = g["average"]
+                g = geval_single(en_text, summary_formal, gt_summary=row.get("pseudo_gt", ""))
+                geval_f        = g["faithfulness"]
+                geval_fl       = g["fluency"]
+                geval_c        = g["conciseness"]
+                geval_r        = g["relevance"]
+                geval_avg      = g["g_eval_score"]
+                geval_weighted = g["g_eval_weighted"]
                 time.sleep(0.5)
 
             writer.writerow({
@@ -179,12 +181,14 @@ def run_eval(limit: int = None, skip_geval: bool = False, skip_comet: bool = Fal
                 "geval_faithfulness":   geval_f,
                 "geval_fluency":        geval_fl,
                 "geval_conciseness":    geval_c,
+                "geval_relevance":      geval_r,
                 "geval_avg":            geval_avg,
+                "geval_weighted":       geval_weighted,
                 "n_sentences":          row["n_sentences"],
             })
             f.flush()
 
-            print(f"  BLEU={bleu:.1f}  COMET={comet_score:.4f}  TPR={tpr:.2f}  G-Eval={geval_avg:.1f}")
+            print(f"  BLEU={bleu:.1f}  COMET={comet_score:.4f}  TPR={tpr:.2f}  G-Eval={geval_avg:.1f}  G-Eval(W)={geval_weighted:.1f}")
 
     print(f"\n결과 저장 완료: {RESULTS_PATH}")
 
