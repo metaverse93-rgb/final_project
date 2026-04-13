@@ -18,6 +18,7 @@ import os
 import sys
 import csv
 import json
+import re
 import argparse
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -38,6 +39,16 @@ Rules:
 - Transliterate technical terms: Fine-tuning→파인튜닝, Embedding→임베딩, Prompt→프롬프트.
 - For NEW coinages, use: OriginalTerm(한국어, brief explanation) on first mention.
 - Output ONLY the Korean translation. No explanation, no preamble."""
+
+
+def clean_text(text: str) -> str:
+    """학습 데이터 텍스트 정제 — 스마트따옴표, 제어문자, 줄바꿈 정규화"""
+    text = (text
+            .replace('\u201c', '"').replace('\u201d', '"')
+            .replace('\u2018', "'").replace('\u2019', "'"))
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    return text.strip()
 
 
 def to_chat_format(en_text: str, ko_text: str) -> dict:
@@ -64,8 +75,8 @@ def convert(src_csv: str, out_jsonl: str, limit: int = None):
             if limit and count >= limit:
                 break
 
-            en_text = row.get("en_text", "").strip()
-            ko_text = row.get("ko_text", "").strip()
+            en_text = clean_text(row.get("en_text", ""))
+            ko_text = clean_text(row.get("ko_text", ""))
 
             # 너무 짧거나 비어있는 쌍 제외
             if len(en_text) < 20 or len(ko_text) < 10:

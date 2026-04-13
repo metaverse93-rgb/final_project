@@ -1,6 +1,7 @@
 import ollama
 from dotenv import load_dotenv
 import os
+from pipeline.utils import preprocess_text
 
 load_dotenv()
 
@@ -29,6 +30,4 @@ def summarize(text: str) -> str:
         think=False,
     )
     content = response.message.content
-    if "</think>" in content:
-        content = content.split("</think>")[-1].strip()
-    return content
+    return preprocess_text(content)
