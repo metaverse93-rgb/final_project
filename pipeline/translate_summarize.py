@@ -37,11 +37,13 @@ If the source contains these scripts, translate or romanize them into Korean. NE
 ━━━ OUTPUT FORMAT ━━━
 Return ONLY valid JSON. No markdown fences, no explanation outside JSON.
 {{
+  "title_ko": "<한국어 제목>",
   "translation": "<전체 한국어 번역>",
   "summary_formal": "<격식체 요약>",
   "summary_casual": "<일상체 요약>"
 }}
-All three fields are REQUIRED. Never leave any field empty.
+All four fields are REQUIRED. Never leave any field empty.
+If no title is provided, set "title_ko" to "".
 
 ━━━ TRANSLATION RULES ━━━
 1. Translate the ENTIRE article into Korean.
@@ -95,6 +97,13 @@ All three fields are REQUIRED. Never leave any field empty.
 8. New English coinages not in the glossary: EnglishTerm(한국어 음차, 한 줄 설명) on first mention.
    Example: Blackwell Ultra(블랙웰 울트라, Nvidia 차세대 GPU 아키텍처)
 
+━━━ TITLE TRANSLATION RULES ━━━
+- title_ko: translate the English title into Korean headline style.
+- Use noun-final endings: ~함 / ~됨 / ~발표 / ~출시 / ~공개
+- Keep it concise — omit articles (a/the) and filler words.
+- Apply all proper noun, person name, and number rules above.
+- If no title is given in the input, set title_ko to "".
+
 ━━━ SUMMARY RULES ━━━
 - summary_formal: exactly {n} Korean sentence(s), 격식체 (~습니다/~됩니다). Must be complete.
 - summary_casual: exactly {n} Korean sentence(s), 일상체 (~해요/~예요/~거예요). Must be complete.
@@ -126,6 +135,7 @@ def estimate_sentences(text: str, max_sentences: int = 3) -> int:
 # ────────────────────────────────────────────────
 def translate_and_summarize(
     text: str,
+    title: str = "",
     summary_sentences: int = 3,
     temperature: float = 0.1,
 ) -> dict:
@@ -133,25 +143,28 @@ def translate_and_summarize(
     영어 뉴스 기사를 격식체·일상체로 번역하고 요약합니다 (단일 LLM 호출).
 
     Args:
-        text: 원본 영어 텍스트
+        text: 원본 영어 본문
+        title: 영어 기사 제목 (선택). 제공 시 title_ko 번역 포함.
         summary_sentences: 요약 문장 수 (기본: 3)
         temperature: 생성 다양성 (0.0~1.0)
 
     Returns:
         {
-            "translation": str,     # 번역 전문
-            "summary_formal": str,  # 격식체 3줄 요약
-            "summary_casual": str,  # 일상체 3줄 요약
+            "title_ko":      str,  # 한국어 제목 (title 미제공 시 "")
+            "translation":   str,  # 번역 전문
+            "summary_formal": str, # 격식체 요약
+            "summary_casual": str, # 일상체 요약
         }
     """
     system = SYSTEM_PROMPT.format(n=summary_sentences)
+    user_content = f"[TITLE]\n{title}\n\n[BODY]\n{text}" if title else text
 
     for attempt in range(3):   # 최대 3회 시도
         response = ollama.chat(
             model=MODEL,
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user", "content": text},
+                {"role": "user", "content": user_content},
             ],
             options={
                 "temperature": 0.1,

@@ -96,13 +96,13 @@ CREATE TABLE IF NOT EXISTS neologisms (
 
 
 -- ============================================================
--- 4. eval_results  (파인튜닝 전/후 평가 지표, MVP 이후 활용)
+-- 4. eval_results  (파인튜닝 전/후 평가 지표)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS eval_results (
 
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    article_url_hash    VARCHAR REFERENCES articles(url_hash) ON DELETE CASCADE,
-    model_version       VARCHAR,  -- 'qwen3-4b-base' | 'qwen3-4b-ft-v1' | 'gpt-4o'
+    article_url_hash    VARCHAR,  -- MD5(url). articles FK 없음 — testset 기사는 articles에 없을 수 있음
+    model_version       VARCHAR,  -- 'qwen3.5-4b-base' | 'qwen3.5-4b-ft-v1' | 'gpt-4o'
     eval_type           VARCHAR,  -- 'translation' | 'summary_formal'
 
     -- 번역 평가 (eval_type = 'translation')
@@ -111,10 +111,12 @@ CREATE TABLE IF NOT EXISTS eval_results (
     tpr                 FLOAT,    -- Term Preservation Rate
 
     -- 요약 평가 (eval_type = 'summary_formal')
-    geval_faithfulness  FLOAT,    -- 충실성 (1~5)
-    geval_fluency       FLOAT,    -- 유창성 (1~5)
-    geval_conciseness   FLOAT,    -- 간결성 (1~5)
-    geval_relevance     FLOAT,    -- 관련성 (1~5)
+    geval_consistency   FLOAT,    -- 일치성: 생성 요약 ↔ 원문 팩트 일치 (1~5)
+    geval_fluency       FLOAT,    -- 유창성: 한국어 자연스러움 + 용어 규칙 (1~5)
+    geval_coherence     FLOAT,    -- 일관성: 논리적 구조 (1~5)
+    geval_relevance     FLOAT,    -- 관련성: 핵심 포인트 커버리지 (1~5)
+    geval_avg           FLOAT,    -- 단순 평균 (4축)
+    geval_weighted      FLOAT,    -- 가중 평균 (consistency×0.4 + relevance×0.3 + fluency×0.2 + coherence×0.1)
 
     evaluated_at        TIMESTAMPTZ DEFAULT NOW()
 );

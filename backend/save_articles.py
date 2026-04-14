@@ -185,9 +185,10 @@ def save_eval_result(
 
     eval_type = 'translation'    → metrics: bleu, comet, tpr
     eval_type = 'summary_formal' → metrics: geval_consistency, geval_fluency,
-                                             geval_coherence, geval_relevance
+                                             geval_coherence, geval_relevance,
+                                             geval_avg, geval_weighted
     예시:
-        save_eval_result(hash, 'qwen3-4b-base', 'translation', bleu=12.3, comet=0.71, tpr=0.88)
+        save_eval_result(hash, 'qwen3.5-4b-base', 'translation', bleu=12.3, comet=0.71, tpr=0.88)
     """
     sb.table("eval_results").insert({
         "article_url_hash": url_hash,
