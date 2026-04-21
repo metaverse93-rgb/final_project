@@ -14,11 +14,10 @@ from models.article import Article
 SOURCE_CREDIBILITY: dict[str, float] = {
     "MIT Technology Review": 0.95,
     "IEEE Spectrum":         0.93,
-    "BBC Technology":        0.90,
     "The Guardian Tech":     0.88,
     "TechCrunch":            0.82,
+    "The Decoder":           0.82,
     "The Verge":             0.80,
-
     "VentureBeat AI":        0.75,
 }
 
