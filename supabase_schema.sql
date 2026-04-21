@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS articles (
     summary_casual    TEXT,                  -- 일상체 3줄 요약 (~해요)
 
     -- RAG (강주찬)
-    embedding         VECTOR(1024)           -- translation 임베딩. mxbai-embed-large
+    embedding         VECTOR(1024)           -- translation 임베딩. Qwen3-Embedding-0.6B
 );
 
 -- 인덱스

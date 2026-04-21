@@ -11,7 +11,7 @@ sb = create_client(
 )
 
 OLLAMA_URL  = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").replace("/v1", "")
-EMBED_MODEL = "mxbai-embed-large"
+EMBED_MODEL = "qwen3-embedding:0.6b"
 
 
 def make_embedding(text: str) -> list[float]:
@@ -20,7 +20,7 @@ def make_embedding(text: str) -> list[float]:
         json={"model": EMBED_MODEL, "prompt": text},
     )
     resp.raise_for_status()
-    return resp.json()["embedding"]
+    return resp.json()["embedding"][:1024]
 
 
 # ── 1. 유저 온보딩 ──────────────────────────────

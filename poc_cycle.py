@@ -1,6 +1,6 @@
 """
 POC 1 사이클
-: 영어 기사 → 번역+요약(Qwen3.5-4B) → 임베딩(mxbai-embed-large) → Supabase 저장 → 조회
+: 영어 기사 → 번역+요약(Qwen3.5-4B) → 임베딩(Qwen3-Embedding-0.6B) → Supabase 저장 → 조회
 
 실행: C:/tmp/venv312/Scripts/python.exe poc_cycle.py
 """
@@ -15,7 +15,7 @@ from supabase import create_client
 from pipeline.translate_summarize import translate_and_summarize, estimate_sentences
 
 OLLAMA_URL  = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").replace("/v1", "")
-EMBED_MODEL = "mxbai-embed-large"
+EMBED_MODEL = "qwen3-embedding:0.6b"
 
 SAMPLE_ARTICLE = {
     "source":       "TechCrunch",
@@ -68,7 +68,7 @@ def main():
     print(f"[요약 — 일상체]\n{summary_casual}\n")
 
     # Step 2: 임베딩
-    print("Step 2: 임베딩 생성 (mxbai-embed-large via Ollama)...")
+    print("Step 2: 임베딩 생성 (Qwen3-Embedding-0.6B via Ollama)...")
     embedding = make_embedding(translation)
     print(f"  벡터 차원: {len(embedding)}\n")
 
