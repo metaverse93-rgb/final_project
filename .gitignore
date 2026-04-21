@@ -20,6 +20,7 @@ eval/data/
 =0.8.0
 _guide_tmp.txt
 .claude/
+*.pdf
 
 # JS / build
 node_modules/

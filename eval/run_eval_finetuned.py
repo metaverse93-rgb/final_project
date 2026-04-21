@@ -145,6 +145,8 @@ def generate(model, tokenizer, messages: list[dict], max_new_tokens: int) -> str
             temperature=0.1,
             do_sample=True,
             pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            repetition_penalty=1.15,
         )
 
     new_ids = output_ids[0][inputs["input_ids"].shape[1]:]
