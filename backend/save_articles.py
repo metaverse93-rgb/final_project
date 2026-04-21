@@ -119,6 +119,7 @@ def save_articles(articles: list[dict]) -> int:
             "content":           content,
             "credibility_score": score,
             "fact_label":        fact_label,
+            "needs_review":      fact_label == "UNVERIFIED",
             "translation":       a.get("translation"),
             "summary_formal":    a.get("summary_formal"),
             "summary_casual":    a.get("summary_casual"),

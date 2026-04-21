@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS articles (
                                              -- FACT | RUMOR | UNVERIFIED
                                              -- credibility_score 기반 자동 분류 (MVP)
                                              -- fact_checks 집계로 갱신 (MVP 이후)
+    needs_review      BOOLEAN DEFAULT FALSE, -- TRUE → 관리자 수동 검토 대기 (UNVERIFIED 기사)
 
     -- 번역·요약 출력 (이동우)
     translation       TEXT,                  -- 한국어 번역 전문

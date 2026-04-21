@@ -139,7 +139,8 @@ def run_fact_check(
             reasoning_trace=f"Opinion 패턴 탐지 → DROP: {signal.matched_patterns[:3]}",
         )
 
-    if signal.fact_label_hint == "FACT_AUTO":
+    # MEDIA_CREDIBLE_LEAK는 소식통 인용이 잦은 출처 — 루머 신호 없어도 LLM 검증 필요
+    if signal.fact_label_hint == "FACT_AUTO" and tier != "MEDIA_CREDIBLE_LEAK":
         return FactCheckResult(
             fact_label="FACT", confidence=profile.credibility_score,
             tier=tier, step_reached=1,

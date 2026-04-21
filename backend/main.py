@@ -10,6 +10,7 @@ import logging
 import os
 
 from fastapi import FastAPI, HTTPException
+from typing import Literal
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client
@@ -190,6 +191,52 @@ def summarize(req: LlmTextRequest):
         "summary_formal": out.get("summary_formal", ""),
         "summary_casual": out.get("summary_casual", ""),
     }
+
+
+@app.get("/admin/review")
+def get_review_queue(limit: int = 50):
+    """
+    UNVERIFIED 기사 중 수동 검토 대기 목록 반환.
+    어드민 화면에서 사람이 직접 FACT/RUMOR 판정할 때 사용.
+    """
+    result = sb.table("articles").select(
+        "url_hash, title, source, published_at, fact_label, needs_review"
+    ).eq("needs_review", True).order("published_at", desc=True).limit(limit).execute()
+    return {"queue": result.data, "count": len(result.data)}
+
+
+class ReviewDecision(BaseModel):
+    verdict: Literal["FACT", "RUMOR", "UNVERIFIED"]
+    reviewer_note: str = ""
+
+
+@app.patch("/admin/review/{url_hash}")
+def submit_review(url_hash: str, body: ReviewDecision):
+    """
+    관리자가 UNVERIFIED 기사에 직접 판정을 내릴 때 호출.
+    fact_label 업데이트 후 needs_review = False 처리.
+    """
+    result = sb.table("articles").select("url_hash").eq("url_hash", url_hash).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="기사 없음")
+
+    sb.table("articles").update({
+        "fact_label":   body.verdict,
+        "needs_review": False,
+    }).eq("url_hash", url_hash).execute()
+
+    if body.reviewer_note:
+        sb.table("fact_checks").insert({
+            "article_url_hash":    url_hash,
+            "claim":               "human review",
+            "verdict":             body.verdict,
+            "confidence":          1.0,
+            "checker_type":        "human",
+            "verification_method": "human",
+            "reasoning_trace":     body.reviewer_note,
+        }).execute()
+
+    return {"message": f"{url_hash} → {body.verdict} 처리 완료"}
 
 
 @app.post("/article-view/{user_id}/{url_hash}")

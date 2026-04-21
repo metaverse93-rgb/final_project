@@ -164,7 +164,7 @@ set_font(run2, size=14, color=(80, 80, 80))
 p3 = doc.add_paragraph()
 p3.alignment = WD_ALIGN_PARAGRAPH.CENTER
 p3.paragraph_format.space_before = Pt(8)
-run3 = p3.add_run("담당: 이동우 · 2026-04-21  |  6주차")
+run3 = p3.add_run("담당: 이동우 · 2026-04-21  |  6주차  (v2 — CREDIBLE_LEAK 라우팅 + Human-in-the-Loop 추가)")
 set_font(run3, size=10, color=(130, 130, 130))
 
 doc.add_page_break()
@@ -375,9 +375,113 @@ add_table(doc,
 
 
 # ══════════════════════════════════════════════════════════════
-# 6. 수정된 파일 목록
+# 6. 추가 개선: CREDIBLE_LEAK 라우팅 수정
 # ══════════════════════════════════════════════════════════════
-add_heading(doc, "6. 수정된 파일 목록", level=1)
+add_heading(doc, "6. 추가 개선 ①: CREDIBLE_LEAK 출처 자동 FACT 방지", level=1)
+add_body(doc, "시뮬레이션 중 발견된 문제: VentureBeat처럼 기본 등급이 MEDIA_CREDIBLE_LEAK인 출처가 루머 신호가 없을 때 Step 1에서 바로 FACT_AUTO로 처리되고 있었습니다.")
+
+add_heading(doc, "6-1. 문제 원인", level=2)
+add_code_block(doc, [
+    "# 기존 코드 (pipeline.py)",
+    "if signal.fact_label_hint == 'FACT_AUTO':   # tier 무관하게 즉시 FACT 반환",
+    "    return FactCheckResult(fact_label='FACT', ...)",
+    "",
+    "# VentureBeat의 경우:",
+    "# - default_tier = MEDIA_CREDIBLE_LEAK  (소식통 인용이 잦은 출처)",
+    "# - 루머 신호 패턴 없음  →  signal_detector가 FACT_AUTO 힌트 반환",
+    "# - 결과: 검증 없이 FACT 처리  ← 문제!",
+])
+
+add_heading(doc, "6-2. 수정 내용", level=2)
+add_code_block(doc, [
+    "# 수정 후 코드 (pipeline.py)",
+    "# MEDIA_CREDIBLE_LEAK는 루머 신호가 없어도 LLM 검증 필요",
+    "if signal.fact_label_hint == 'FACT_AUTO' and tier != 'MEDIA_CREDIBLE_LEAK':",
+    "    return FactCheckResult(fact_label='FACT', ...)",
+    "",
+    "# CREDIBLE_LEAK tier는 조건을 통과하지 못하고 Step 2/3으로 계속 진행됨",
+])
+
+add_table(doc,
+    ["출처 예시", "tier", "수정 전", "수정 후"],
+    [
+        ["MIT Technology Review", "MEDIA_OFFICIAL", "Step 1 → FACT_AUTO ✅", "Step 1 → FACT_AUTO ✅ (변경 없음)"],
+        ["VentureBeat AI", "MEDIA_CREDIBLE_LEAK", "Step 1 → FACT_AUTO ❌", "Step 3A Gemini 검증 ✅"],
+        ["The Decoder", "MEDIA_OFFICIAL\n(Leak 신호 있을 때 CREDIBLE_LEAK으로 조정)", "신호 있으면 이미 Step 3 진행", "동일 (변경 없음)"],
+    ],
+    col_widths=[3.8, 3.5, 3.5, 3.7]
+)
+
+add_callout(doc,
+    "영향: VentureBeat AI는 매일 수십 건의 기사를 발행하므로 이 수정으로 해당 출처의 모든 기사가 Gemini 검증을 받게 됩니다. API 호출 증가가 예상되나 소식통 인용 출처의 정확도를 위해 필요한 트레이드오프입니다.",
+    bg="FFF2CC", color=(127, 96, 0)
+)
+
+
+# ══════════════════════════════════════════════════════════════
+# 7. 추가 개선: Human-in-the-Loop (UNVERIFIED 수동 검토)
+# ══════════════════════════════════════════════════════════════
+add_heading(doc, "7. 추가 개선 ②: UNVERIFIED → Human-in-the-Loop", level=1)
+add_body(doc, "DebateCV 3인 토론에서 SPLIT(팽팽) 판정이 나거나 LLM이 판단을 포기하면 UNVERIFIED 라벨이 붙습니다. 이 기사를 자동 처리하지 않고 사람이 최종 판정하도록 구조를 추가했습니다.")
+
+add_heading(doc, "7-1. UNVERIFIED가 발생하는 경우", level=2)
+add_table(doc,
+    ["상황", "confidence", "처리"],
+    [
+        ["DebateCV 3인 토론에서 SPLIT 판정", "0.50~0.65", "UNVERIFIED → 수동 검토 대기"],
+        ["Gemini/CoVe API 예외 발생 + importance 낮음", "0.50", "UNVERIFIED → 수동 검토 대기"],
+        ["Google FC API 미매칭 + skip_llm=True (테스트 모드)", "0.50", "UNVERIFIED → 수동 검토 대기"],
+    ],
+    col_widths=[7.0, 2.5, 4.5]
+)
+
+add_heading(doc, "7-2. 처리 흐름", level=2)
+add_code_block(doc, [
+    "파이프라인 결과 → fact_label = 'UNVERIFIED'",
+    "                           ↓",
+    "  DB 저장 시 needs_review = TRUE  (articles 테이블 신규 컬럼)",
+    "                           ↓",
+    "  GET /admin/review         ← 관리자가 대기 목록 조회",
+    "                           ↓",
+    "  [FACT 확인] / [RUMOR 확인] / [무시] 버튼 클릭",
+    "                           ↓",
+    "  PATCH /admin/review/{url_hash}  { verdict: 'FACT' | 'RUMOR' | 'UNVERIFIED' }",
+    "                           ↓",
+    "  articles.fact_label 업데이트 + needs_review = FALSE",
+    "  fact_checks 테이블에 checker_type='human' 기록 저장",
+])
+
+add_heading(doc, "7-3. 추가된 API 엔드포인트", level=2)
+add_table(doc,
+    ["메서드", "경로", "역할", "담당"],
+    [
+        ["GET",   "/admin/review",              "needs_review=TRUE 기사 목록 반환", "이동우 (backend)"],
+        ["PATCH", "/admin/review/{url_hash}",   "verdict 직접 입력 → fact_label 업데이트", "이동우 (backend)"],
+    ],
+    col_widths=[2.0, 5.0, 5.5, 2.5]
+)
+
+add_heading(doc, "7-4. DB 변경 사항", level=2)
+add_code_block(doc, [
+    "-- articles 테이블 신규 컬럼 (supabase_schema.sql 반영)",
+    "needs_review  BOOLEAN DEFAULT FALSE,",
+    "-- TRUE  → 관리자 수동 검토 대기 (UNVERIFIED 기사)",
+    "-- FALSE → 검토 완료 또는 검토 불필요",
+    "",
+    "-- fact_checks 테이블 — 기존 checker_type 컬럼 활용",
+    "checker_type = 'human'  -- 관리자가 직접 판정한 기록",
+])
+
+add_callout(doc,
+    "프론트엔드 연동: UNVERIFIED 기사는 사용자 피드에 노출되지만 fact_label 뱃지가 '검토 중'으로 표시되도록 정수민님과 협의가 필요합니다. needs_review=TRUE인 기사를 피드에서 숨길지 여부도 PM(김민규님)이 결정해주세요.",
+    bg="FCE4EC", color=(136, 14, 79)
+)
+
+
+# ══════════════════════════════════════════════════════════════
+# (기존 6번 → 8번으로 변경)
+# ══════════════════════════════════════════════════════════════
+add_heading(doc, "8. 수정된 파일 목록", level=1)
 
 add_table(doc,
     ["파일", "변경 내용", "팀원 영향"],
@@ -389,14 +493,23 @@ add_table(doc,
          "Draft LLM 호출 제거\nprior_verdict를 Draft로 재사용",
          "없음"],
         ["fact_checker/pipeline.py",
-         "gemini_run() 호출 시 signal 결과 전달\n파이프라인 주석 업데이트",
+         "gemini_run() 호출 시 signal 결과 전달\nCREDIBLE_LEAK FACT_AUTO 방지 조건 추가",
          "없음"],
         ["fact_checker/signal_detector.py",
-         "주석 업데이트\n(\"Gemini 검증 요청\" → 파이프라인 명칭)",
+         "주석 업데이트",
          "없음"],
         ["fact_checker/channel_config.py",
-         "주석 업데이트\n(\"Gemini 검증\" → \"팩트체크 파이프라인 (3A→3C)\")",
+         "주석 업데이트",
          "없음"],
+        ["backend/save_articles.py",
+         "UNVERIFIED 저장 시 needs_review=True 자동 설정",
+         "없음 (자동 처리)"],
+        ["backend/main.py",
+         "GET /admin/review 엔드포인트 추가\nPATCH /admin/review/{url_hash} 엔드포인트 추가",
+         "정수민(프론트): 어드민 UI 연동 시 참고"],
+        ["supabase_schema.sql",
+         "articles 테이블에 needs_review BOOLEAN 컬럼 추가",
+         "강주찬: Supabase SQL Editor에서 ALTER TABLE 실행 필요"],
     ],
     col_widths=[4.5, 6.0, 4.0]
 )
@@ -410,7 +523,7 @@ add_callout(doc,
 # ══════════════════════════════════════════════════════════════
 # 7. 현재 KPI 목표
 # ══════════════════════════════════════════════════════════════
-add_heading(doc, "7. 팩트체크 KPI 목표", level=1)
+add_heading(doc, "9. 팩트체크 KPI 목표", level=1)
 
 add_table(doc,
     ["지표", "목표", "현재 상태", "측정 시점"],
