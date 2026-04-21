@@ -64,6 +64,45 @@ def check_term_preservation(translation: str, source: str = "", terms: list[str]
     }
 
 
+# ── 후처리: 음역된 고유명사 영문 복원 ──────────────────────────
+# 파인튜닝 모델이 간헐적으로 음역하는 패턴 대응
+# (Ugawa et al., 2018 EMNLP — Named Entity Preservation in NMT)
+import re as _re
+
+_RESTORE_MAP = [
+    # (한국어 음역 패턴, 영문 원형)
+    (_re.compile(r"엔비디아"), "Nvidia"),
+    (_re.compile(r"오픈에이아이|오픈AI"), "OpenAI"),
+    (_re.compile(r"앤트로픽|앤쓰로픽"), "Anthropic"),
+    (_re.compile(r"마이크로소프트"), "Microsoft"),
+    (_re.compile(r"아마존(?!\s*닷컴)"), "Amazon"),
+    (_re.compile(r"딥마인드"), "DeepMind"),
+    (_re.compile(r"허깅페이스|허깅 페이스"), "Hugging Face"),
+    (_re.compile(r"미스트랄"), "Mistral"),
+    (_re.compile(r"코히어"), "Cohere"),
+    (_re.compile(r"스태빌리티\s*AI"), "Stability AI"),
+    # 모델명 음역 패턴
+    (_re.compile(r"지피티[-\s]?4"), "GPT-4"),
+    (_re.compile(r"지피티[-\s]?4o"), "GPT-4o"),
+    (_re.compile(r"제미나이"), "Gemini"),
+    (_re.compile(r"라마(?=\s*\d|\s*[23])"), "Llama"),
+    (_re.compile(r"그록"), "Grok"),
+    (_re.compile(r"딥씩|딥시크"), "DeepSeek"),
+]
+
+
+def restore_entities(text: str) -> str:
+    """
+    파인튜닝 모델이 음역한 고유명사를 영문으로 복원하는 후처리.
+
+    사용 시점: translate() 직후 결과에 적용.
+    Note: Google·Meta·Apple·Samsung은 문맥 오탐 위험으로 제외.
+    """
+    for pattern, replacement in _RESTORE_MAP:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def batch_tpr(translations: list[str], terms: list[str] = None) -> dict:
     """
     여러 번역 출력의 평균 TPR 계산.

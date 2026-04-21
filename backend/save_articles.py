@@ -9,10 +9,10 @@ backend/save_articles.py — Supabase DB 연동 함수 모음
 
 import os
 import hashlib
-import requests
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from supabase import create_client
+from backend.embedder import make_embedding
 
 load_dotenv()
 
@@ -22,10 +22,6 @@ sb = create_client(
     os.getenv("SUPABASE_KEY"),
 )
 
-# ── Ollama 임베딩 설정 ───────────────────────────────────────
-OLLAMA_URL  = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").replace("/v1", "")
-EMBED_MODEL = "mxbai-embed-large"
-
 
 # ── 유틸 ────────────────────────────────────────────────────
 
@@ -34,20 +30,10 @@ def make_url_hash(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
 
 
-def make_embedding(text: str) -> list[float]:
-    """텍스트 → 1024차원 벡터 (mxbai-embed-large via Ollama)"""
-    resp = requests.post(
-        f"{OLLAMA_URL}/api/embeddings",
-        json={"model": EMBED_MODEL, "prompt": text},
-    )
-    resp.raise_for_status()
-    return resp.json()["embedding"]
-
-
 def infer_fact_label(credibility_score: float) -> str:
     """
-    credibility_score 기반 자동 분류 (MVP).
-    MVP 이후 fact_checks 집계로 대체 예정.
+    credibility_score 기반 자동 분류 (fallback용).
+    fact_checker 파이프라인이 실패할 경우에만 사용.
     """
     if credibility_score >= 0.8:
         return "FACT"
@@ -61,6 +47,7 @@ def infer_fact_label(credibility_score: float) -> str:
 def save_articles(articles: list[dict]) -> int:
     """
     파이프라인 결과를 articles 테이블에 배치 upsert.
+    팩트체크 파이프라인(Step 0~2)을 먼저 실행 후 저장.
 
     articles 리스트 각 항목에 필요한 키:
         url, title, source, source_type, category, country,
@@ -68,37 +55,82 @@ def save_articles(articles: list[dict]) -> int:
         content, credibility_score,
         translation, summary_formal, summary_casual
 
-    Returns: 저장된 건수
+    Returns: 저장된 건수 (DROP된 기사 제외)
     """
+    # fact_checker import는 런타임에 — 의존성 없을 때 크래시 방지
+    try:
+        from fact_checker.pipeline import run_fact_check
+        fc_available = True
+    except ImportError:
+        fc_available = False
+        print("[WARN] fact_checker 모듈 없음 — credibility_score 기반 fallback 사용")
+
     batch = []
+    dropped = 0
+
     for a in articles:
-        url       = a.get("url", "")
-        url_hash  = make_url_hash(url)
-        score     = a.get("credibility_score") or 0.5
+        url          = a.get("url", "")
+        url_hash     = make_url_hash(url)
+        score        = a.get("credibility_score") or 0.5
+        title        = a.get("title", "")
+        content      = a.get("content", "")
+        source       = a.get("source", "")
+        source_type  = a.get("source_type", "media")
+
+        # ── 팩트체크 파이프라인 (Step 0~2) ──────────────────
+        if fc_available:
+            try:
+                fc_result = run_fact_check(
+                    title=title,
+                    content=content,
+                    source=source,
+                    source_type=source_type,
+                )
+
+                # DROP → DB 저장 안 함
+                if not fc_result.should_save():
+                    dropped += 1
+                    continue
+
+                fact_label = fc_result.fact_label
+
+                # fact_checks 테이블에 결과 기록
+                save_fact_checks(url_hash, [fc_result.to_claim_dict(title)])
+
+            except Exception as e:
+                print(f"[WARN] 팩트체크 오류 ({source}): {e} — fallback 사용")
+                fact_label = infer_fact_label(score)
+        else:
+            fact_label = infer_fact_label(score)
+
         embedding = make_embedding(a.get("translation", ""))
 
         batch.append({
             "url_hash":          url_hash,
             "url":               url,
-            "title":             a.get("title"),
-            "source":            a.get("source"),
-            "source_type":       a.get("source_type"),
+            "title":             a.get("title_ko") or title,  # 한국어 제목 우선, 없으면 영문 원제
+            "source":            source,
+            "source_type":       source_type,
             "category":          a.get("category"),
             "country":           a.get("country"),
             "keywords":          a.get("keywords") or [],
             "published_at":      a.get("published_at"),
             "collected_at":      datetime.now(timezone.utc).isoformat(),
-            "content":           a.get("content"),
+            "content":           content,
             "credibility_score": score,
-            "fact_label":        infer_fact_label(score),
+            "fact_label":        fact_label,
             "translation":       a.get("translation"),
             "summary_formal":    a.get("summary_formal"),
             "summary_casual":    a.get("summary_casual"),
             "embedding":         embedding,
         })
 
+    if not batch:
+        print(f"[DB] 저장 대상 없음 (전체 {dropped}건 DROP)")
+        return 0
+
     sb.table("articles").upsert(batch, on_conflict="url_hash").execute()
-    print(f"[DB] articles {len(batch)}건 저장 완료")
+    print(f"[DB] articles {len(batch)}건 저장 완료 (DROP {dropped}건 제외)")
     return len(batch)
 
 
@@ -143,14 +175,17 @@ def save_neologisms(terms: list[str], url_hash: str) -> None:
 
 def save_fact_checks(url_hash: str, claims: list[dict]) -> None:
     """
-    팩트체크 결과 저장 (MVP 이후 활용).
+    팩트체크 결과 저장.
 
-    claims 리스트 각 항목:
+    claims 리스트 각 항목 (pipeline.FactCheckResult.to_claim_dict() 출력):
         {
-            "claim":        "엔비디아 시총 3조 달러 돌파",
-            "verdict":      "FACT",   # FACT | RUMOR | UNVERIFIED
-            "confidence":   0.92,
-            "evidence_url": None,     # MVP에서는 None
+            "claim":               "엔비디아 시총 3조 달러 돌파",
+            "verdict":             "FACT",       # FACT | RUMOR | UNVERIFIED
+            "confidence":          0.92,
+            "evidence_url":        None,
+            "verification_method": "gemini",     # auto | google_fc | gemini | cove | debate
+            "importance_score":    0.767,
+            "reasoning_trace":     "...",        # 한국어 판단 근거
         }
     """
     if not claims:
@@ -158,13 +193,16 @@ def save_fact_checks(url_hash: str, claims: list[dict]) -> None:
 
     rows = [
         {
-            "article_url_hash": url_hash,
-            "claim":            c.get("claim"),
-            "verdict":          c.get("verdict", "UNVERIFIED"),
-            "confidence":       c.get("confidence"),
-            "evidence_url":     c.get("evidence_url"),
-            "checker_type":     "ai",
-            "checked_at":       datetime.now(timezone.utc).isoformat(),
+            "article_url_hash":   url_hash,
+            "claim":              c.get("claim"),
+            "verdict":            c.get("verdict", "UNVERIFIED"),
+            "confidence":         c.get("confidence"),
+            "evidence_url":       c.get("evidence_url"),
+            "checker_type":       "ai",
+            "verification_method": c.get("verification_method"),
+            "importance_score":   c.get("importance_score"),
+            "reasoning_trace":    c.get("reasoning_trace"),
+            "checked_at":         datetime.now(timezone.utc).isoformat(),
         }
         for c in claims
     ]

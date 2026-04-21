@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS articles (
     url               TEXT NOT NULL,         -- 원문 URL
 
     -- 기사 메타데이터 (RSS 수집 · 이상준)
-    title             TEXT,                  -- 기사 제목 (영문)
+    title             TEXT,                  -- 기사 제목 (한국어 번역본, translate_summarize title_ko 출력)
     source            VARCHAR,               -- 언론사명 (TechCrunch, MIT TR 등)
     source_type       VARCHAR,               -- 'media' | 'community'
     category          VARCHAR,               -- 'AI' | 'Tech' 등. Hybrid Search 필터
@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS fact_checks (
     -- MVP에서는 NULL 허용
     evidence_url      TEXT,       -- 근거 출처 URL
     checker_type      VARCHAR DEFAULT 'ai',  -- 'ai' | 'human'
+
+    -- 멀티에이전트 팩트체크 추적 (2.0)
+    verification_method VARCHAR,  -- 'auto' | 'google_fc' | 'gemini' | 'cove' | 'debate'
+    importance_score    FLOAT,    -- 기사 중요도 점수 (0.0~1.0, ClaimBuster 기반)
+    reasoning_trace     TEXT,     -- 최종 판단 근거 요약 (한국어)
 
     checked_at        TIMESTAMPTZ DEFAULT NOW()
 );

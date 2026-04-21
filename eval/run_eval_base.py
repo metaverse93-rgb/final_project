@@ -109,7 +109,12 @@ def print_summary(results_path: str):
         return
 
     def mean(key):
-        vals = [float(r[key]) for r in rows if r.get(key) not in ("", "0", "0.0", None)]
+        # TPR=0은 유효한 값(용어 완전 미보존)이므로 빈값/None만 제외
+        # G-Eval 0은 API 실패를 의미하므로 제외 유지
+        if key == "tpr":
+            vals = [float(r[key]) for r in rows if r.get(key) not in ("", None)]
+        else:
+            vals = [float(r[key]) for r in rows if r.get(key) not in ("", "0", "0.0", None)]
         return round(sum(vals) / len(vals), 4) if vals else 0.0
 
     n = len(rows)

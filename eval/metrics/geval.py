@@ -1,64 +1,50 @@
 """
-G-Eval — 요약 품질 자동 평가 (Claude Haiku via Anthropic API)
-평가 4축: 일치성(Consistency) / 유창성(Fluency) / 일관성(Coherence) / 관련성(Relevance) (각 5점 척도)
+G-Eval — 요약 품질 자동 평가 (OpenRouter gpt-4.1-mini, logprobs 방식)
+평가 4축: Consistency / Fluency / Coherence / Relevance (각 1~5 연속형)
 대상: summary_formal (격식체)
+
 논문 근거: Liu et al. (2023) "G-Eval: NLG Evaluation using GPT-4 with Better Human Alignment"
           Fabbri et al. (2021) "SummEval: Re-evaluating Summarization Evaluation"
 
-점수 산출:
+점수 산출 (logprobs 가중평균 — 논문 원본 방식):
+    각 축 점수 = Σ(i × P("i")) / Σ P("i")   (i ∈ {1,2,3,4,5})
     g_eval_score    = (consistency + fluency + coherence + relevance) / 4
     g_eval_weighted = consistency*0.4 + relevance*0.3 + fluency*0.2 + coherence*0.1
 
-설치:
-    pip install anthropic
+변경 이력:
+    v1: Claude Haiku, JSON 정수 출력, source[:2000]
+    v2: gpt-4.1-mini via OpenRouter, logprobs 연속형 점수, source[:10000]
+
 환경변수:
-    ANTHROPIC_API_KEY
+    OPENROUTER_API_KEY
 """
 
 import os
-import json
+import math
 import time
 from dotenv import load_dotenv
 
 load_dotenv()
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-EVAL_MODEL = "claude-haiku-4-5-20251001"
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+EVAL_MODEL = "openai/gpt-4.1-mini"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 GEVAL_SYSTEM = "You are a strict and impartial evaluator for Korean AI/tech news summaries."
 
-GEVAL_USER_TEMPLATE = """You will evaluate a MODEL-GENERATED Korean summary using four criteria.
-Each criterion specifies EXACTLY which input to compare against — follow this precisely.
+# 각 축별 독립 프롬프트 — logprobs 방식은 축마다 별도 호출해서 점수 토큰 확률을 정확하게 추출
+_CRITERION_TEMPLATES = {
+    "consistency": """Evaluate the CONSISTENCY of the generated Korean summary against the source article.
 
 INPUTS:
-- [A] Source Article: the original English news article
-- [B] Reference Summary (GT): a human-quality Korean summary used ONLY as a length/density benchmark
-- [C] Generated Summary: the model output you are evaluating
-
----
-
-[A] Source Article
+[A] Source Article (English):
 {source}
 
-[B] Reference Summary (GT)
-{gt_summary}
-
-[C] Generated Summary
+[C] Generated Summary (Korean):
 {generated_summary}
 
----
-
-EVALUATION INSTRUCTIONS:
-For each criterion below:
-1. Identify which input(s) to compare against (specified per criterion)
-2. Think step by step before scoring
-3. Assign an integer score from 1 to 5
-4. Do NOT let scores from one criterion influence another
-
----
-
-CRITERION 1 — Consistency (일치성)
-Compare: [C] vs [A] ONLY. Do NOT use [B].
+CRITERION — Consistency (일치성)
+Compare [C] vs [A] ONLY.
 Question: Are all facts in the generated summary consistent with the source article?
 
 Scoring rubric:
@@ -68,61 +54,68 @@ Scoring rubric:
 2 — Two or more factual errors OR significant distortion of the main claim
 1 — Contains hallucinated facts OR directly contradicts the source
 
-Step-by-step reasoning (cite specific facts if penalizing):
-Score:
+Think step by step, then output ONLY a single integer (1, 2, 3, 4, or 5). No other text.
+Score:""",
 
----
+    "fluency": """Evaluate the FLUENCY of the generated Korean summary.
 
-CRITERION 2 — Fluency (유창성)
-Compare: [C] ONLY. Do NOT use [A] or [B].
+INPUTS:
+[C] Generated Summary (Korean):
+{generated_summary}
+
+CRITERION — Fluency (유창성)
+Compare [C] ONLY. Do NOT use the source article.
 Question: Is the Korean natural and easy to read for a Korean tech news audience?
 
-Terminology rule — the summary must follow Korean tech journalism conventions:
-  ① Abbreviations (RAG, LLM, GPU, NPU, API, etc.) → keep in English as-is; do NOT transliterate
-  ② Standard transliterations: fine-tuning→파인튜닝, embedding→임베딩, prompt→프롬프트
-  ③ Proper nouns on FIRST mention: EnglishName(한국어 음차), e.g., OpenAI(오픈에이아이)
-     Key approved forms: ChatGPT(챗GPT) / Gemini(제미나이) / Llama(라마) / Claude(클로드) /
-     Anthropic(앤트로픽) / Google(구글) / Meta(메타) / Microsoft(마이크로소프트) / Nvidia(엔비디아) /
-     Mistral AI(미스트랄 AI) / Hugging Face(허깅 페이스) / Perplexity AI(퍼플렉시티 AI)
-  ④ Currency: $ → 달러, € → 유로, £ → 파운드, ¥ → 엔/위안
-  ⑤ Numbers: T/trillion→조, B/billion→억, M/million→만, K/thousand→천 (e.g., $2.5B→25억 달러)
-  ⑥ Model version numbers stay in English: e.g., GPT-4o, Claude 3.5 Sonnet
-  Violation types:
-  - Transliterating abbreviations (e.g., "엘엘엠" for LLM) → -1 point
-  - Missing English term on first proper noun mention → -1 point per occurrence
-  - Wrong transliteration form (not matching approved list) → -1 point per occurrence
-  - Wrong currency/number conversion (e.g., $2.5B → "2.5빌리언") → -1 point
+Terminology rules (guide v2):
+- Abbreviations (RAG, LLM, GPU, NPU, API, RLHF, SFT, LoRA, QLoRA) → English ONLY, no transliteration
+- AI/tech terms (Fine-tuning, Embedding, Prompt, Transformer, Benchmark, Inference, Token, Dataset) → English ONLY
+- Proper nouns (Nvidia, OpenAI, Anthropic, Sam Altman) → English ONLY, no Korean transliteration
+- Currency: $ → 달러, $2.5B → 25억 달러
+- Model versions: GPT-4o, Claude 3.5 Sonnet → English as-is
+Violations: each -1 point
 
 Scoring rubric:
 5 — Reads like native Korean tech journalism; all terminology correctly formatted
-4 — Mostly natural; at most 1 minor awkward phrase OR 1 terminology formatting error
-3 — Readable but noticeably unnatural phrasing OR 2 terminology formatting errors
+4 — Mostly natural; at most 1 minor awkward phrase OR 1 terminology error
+3 — Readable but noticeably unnatural phrasing OR 2 terminology errors
 2 — Difficult to read due to awkward Korean OR systematic terminology errors
 1 — Unreadable; machine-translated feel throughout
 
-Step-by-step reasoning (list any terminology violations found):
-Score:
+Think step by step, then output ONLY a single integer (1, 2, 3, 4, or 5). No other text.
+Score:""",
 
----
+    "coherence": """Evaluate the COHERENCE of the generated Korean summary.
 
-CRITERION 3 — Coherence (일관성)
-Compare: [C] ONLY.
+INPUTS:
+[C] Generated Summary (Korean):
+{generated_summary}
+
+CRITERION — Coherence (일관성)
+Compare [C] ONLY.
 Question: Is the generated summary logically structured and coherent?
 
 Scoring rubric:
-5 — Well-structured; sentences flow naturally and connect logically; clear progression of ideas
-4 — Mostly coherent; at most one slightly awkward transition between sentences
+5 — Well-structured; sentences flow naturally and connect logically
+4 — Mostly coherent; at most one slightly awkward transition
 3 — Generally readable but with noticeable disorganization or abrupt transitions
-2 — Hard to follow; sentences seem disconnected or appear in illogical order
+2 — Hard to follow; sentences seem disconnected or in illogical order
 1 — No discernible structure; reads like random unconnected sentences
 
-Step-by-step reasoning (note any structural or transitional issues):
-Score:
+Think step by step, then output ONLY a single integer (1, 2, 3, 4, or 5). No other text.
+Score:""",
 
----
+    "relevance": """Evaluate the RELEVANCE of the generated Korean summary against the source article.
 
-CRITERION 4 — Relevance (관련성)
-Compare: [C] vs [A] ONLY. Do NOT use [B].
+INPUTS:
+[A] Source Article (English):
+{source}
+
+[C] Generated Summary (Korean):
+{generated_summary}
+
+CRITERION — Relevance (관련성)
+Compare [C] vs [A] ONLY.
 Question: Does the generated summary cover the key points of the source article?
 
 Scoring rubric:
@@ -132,118 +125,127 @@ Scoring rubric:
 2 — Two or more important points missing
 1 — Fails to convey the main topic of the source article
 
-Step-by-step reasoning (list key points from source and check coverage):
-Score:
+Think step by step, then output ONLY a single integer (1, 2, 3, 4, or 5). No other text.
+Score:""",
+}
 
----
+_SCORE_TOKENS = ["1", "2", "3", "4", "5"]
 
-OUTPUT FORMAT:
-Respond with valid JSON only. No preamble, no explanation outside the JSON block.
-Compute g_eval_score as the arithmetic mean of the four scores.
-Compute g_eval_weighted = consistency*0.4 + relevance*0.3 + fluency*0.2 + coherence*0.1
 
-{{"consistency": {{"reasoning": "...", "score": X}}, "fluency": {{"reasoning": "...", "score": X}}, "coherence": {{"reasoning": "...", "score": X}}, "relevance": {{"reasoning": "...", "score": X}}, "g_eval_score": X.X, "g_eval_weighted": X.X}}"""
+def _logprob_score(client, criterion: str, source: str, generated_summary: str) -> float:
+    """
+    단일 축 logprobs 가중평균 점수 반환.
+    모델이 "Score:" 다음에 올 숫자 토큰("1"~"5")의 확률 분포로 연속형 점수 계산.
+    """
+    prompt = _CRITERION_TEMPLATES[criterion].format(
+        source=source,
+        generated_summary=generated_summary,
+    )
+
+    response = client.chat.completions.create(
+        model=EVAL_MODEL,
+        messages=[
+            {"role": "system", "content": GEVAL_SYSTEM},
+            {"role": "user",   "content": prompt},
+        ],
+        max_tokens=16,
+        temperature=0,
+        logprobs=True,
+        top_logprobs=10,
+    )
+
+    # 첫 번째 생성 토큰의 top_logprobs에서 "1"~"5" 확률 추출
+    top = response.choices[0].logprobs.content[0].top_logprobs
+    prob_map = {entry.token.strip(): math.exp(entry.logprob) for entry in top}
+
+    weighted_sum = 0.0
+    total_prob   = 0.0
+    for i, token in enumerate(_SCORE_TOKENS, start=1):
+        p = prob_map.get(token, 0.0)
+        weighted_sum += i * p
+        total_prob   += p
+
+    if total_prob < 1e-9:
+        # score 토큰이 top_logprobs에 없는 경우 — 텍스트에서 정수 파싱으로 폴백
+        raw_text = response.choices[0].message.content.strip()
+        for ch in raw_text:
+            if ch in "12345":
+                return float(ch)
+        return 3.0  # 파싱 불가 시 중앙값
+
+    return weighted_sum / total_prob
 
 
 def geval_single(
     source: str,
     summary: str,
-    gt_summary: str = "",
+    gt_summary: str = "",   # 현재 미사용 (logprobs 방식에서 GT는 불필요)
     retries: int = 3,
 ) -> dict:
     """
-    단일 요약문 G-Eval 채점 (4축).
+    단일 요약문 G-Eval 채점 (4축, logprobs 연속형).
 
     Returns:
         {
-            "consistency": int,
-            "fluency":     int,
-            "coherence":   int,
-            "relevance":   int,
+            "consistency":     float,  # 1.0~5.0 연속형
+            "fluency":         float,
+            "coherence":       float,
+            "relevance":       float,
             "g_eval_score":    float,  # 단순평균
             "g_eval_weighted": float,  # 가중평균
-            "raw": str,
         }
     """
     try:
-        import anthropic
+        from openai import OpenAI
     except ImportError:
-        raise ImportError("pip install anthropic")
+        raise ImportError("pip install openai")
 
-    if not ANTHROPIC_API_KEY:
-        raise ValueError("ANTHROPIC_API_KEY 환경변수를 설정하세요.")
+    if not OPENROUTER_API_KEY:
+        raise ValueError("OPENROUTER_API_KEY 환경변수를 설정하세요.")
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-    user_msg = GEVAL_USER_TEMPLATE.format(
-        source=source[:2000],
-        gt_summary=gt_summary[:500] if gt_summary else "(not provided)",
-        generated_summary=summary,
+    client = OpenAI(
+        api_key=OPENROUTER_API_KEY,
+        base_url=OPENROUTER_BASE_URL,
     )
 
-    for attempt in range(retries):
-        try:
-            response = client.messages.create(
-                model=EVAL_MODEL,
-                max_tokens=8192,
-                system=GEVAL_SYSTEM,
-                messages=[{"role": "user", "content": user_msg}],
-            )
-            raw = response.content[0].text.strip()
-            clean = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            scores = json.loads(clean)
+    src = source[:10000]  # 테스트셋 최대 7433자 → 전체 커버
+    gen = summary
 
-            con = int(scores["consistency"]["score"])
-            fl  = int(scores["fluency"]["score"])
-            coh = int(scores["coherence"]["score"])
-            r   = int(scores["relevance"]["score"])
+    scores = {}
+    for criterion in ["consistency", "fluency", "coherence", "relevance"]:
+        for attempt in range(retries):
+            try:
+                scores[criterion] = round(_logprob_score(client, criterion, src, gen), 4)
+                break
+            except Exception as e:
+                if attempt < retries - 1:
+                    time.sleep(2)
+                else:
+                    raise RuntimeError(f"G-Eval [{criterion}] {retries}회 재시도 실패: {e}") from e
 
-            simple   = round((con + fl + coh + r) / 4, 2)
-            weighted = round(con * 0.4 + r * 0.3 + fl * 0.2 + coh * 0.1, 2)
+    con = scores["consistency"]
+    fl  = scores["fluency"]
+    coh = scores["coherence"]
+    rel = scores["relevance"]
 
-            return {
-                "consistency":     con,
-                "fluency":         fl,
-                "coherence":       coh,
-                "relevance":       r,
-                "g_eval_score":    simple,
-                "g_eval_weighted": weighted,
-                "raw":             raw,
-            }
+    simple   = round((con + fl + coh + rel) / 4, 4)
+    weighted = round(con * 0.4 + rel * 0.3 + fl * 0.2 + coh * 0.1, 4)
 
-        except (json.JSONDecodeError, KeyError):
-            # 파싱 실패는 재시도해도 동일 결과 — 즉시 반환
-            return {
-                "consistency": 0, "fluency": 0,
-                "coherence": 0, "relevance": 0,
-                "g_eval_score": 0.0, "g_eval_weighted": 0.0,
-                "raw": raw if "raw" in locals() else "parse error",
-            }
-        except Exception as e:
-            # 400/401/402 등 클라이언트 에러는 재시도해도 의미없음 — 즉시 반환
-            if hasattr(e, "status_code") and e.status_code < 500:
-                return {
-                    "consistency": 0, "fluency": 0,
-                    "coherence": 0, "relevance": 0,
-                    "g_eval_score": 0.0, "g_eval_weighted": 0.0,
-                    "raw": f"error: {e}",
-                }
-            if attempt < retries - 1:
-                time.sleep(3)
-            else:
-                return {
-                    "consistency": 0, "fluency": 0,
-                    "coherence": 0, "relevance": 0,
-                    "g_eval_score": 0.0, "g_eval_weighted": 0.0,
-                    "raw": f"error: {e}",
-                }
+    return {
+        "consistency":     con,
+        "fluency":         fl,
+        "coherence":       coh,
+        "relevance":       rel,
+        "g_eval_score":    simple,
+        "g_eval_weighted": weighted,
+    }
 
 
 def batch_geval(
     sources: list[str],
     summaries: list[str],
     gt_summaries: list[str] = None,
-    delay: float = 0.5,
+    delay: float = 0.3,
 ) -> dict:
     """여러 요약문 G-Eval 배치 채점."""
     if gt_summaries is None:
@@ -258,7 +260,7 @@ def batch_geval(
 
     def mean(key):
         vals = [r[key] for r in results if r[key] > 0]
-        return round(sum(vals) / len(vals), 2) if vals else 0.0
+        return round(sum(vals) / len(vals), 4) if vals else 0.0
 
     return {
         "consistency_mean":     mean("consistency"),

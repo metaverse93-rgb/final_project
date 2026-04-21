@@ -82,7 +82,6 @@ def calc_comet(
         raise ImportError("pip install unbabel-comet")
 
     if model is None:
-        from comet import download_model, load_from_checkpoint
         model = load_from_checkpoint(download_model(model_name))
 
     data = [

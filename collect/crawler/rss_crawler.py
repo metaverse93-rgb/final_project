@@ -24,6 +24,7 @@ from datetime import datetime
 
 from models.article import Article
 from models.credibility import is_ai_related, score_article
+from classifier import classify, normalize_legacy
 
 logger = logging.getLogger(__name__)
 
@@ -252,11 +253,19 @@ def parse_feed(feed_info: dict) -> list[Article]:
                 continue
 
 
+        # 기사별 카테고리 분류
+        # ai_only=True인 전용 피드도 기사 내용 기반으로 세분화
+        article_category = classify(
+            title=title,
+            content=content,
+            fallback_category=feed_info["category"],
+        )
+
         article = Article(
             title=title,
             url=link,
             source=source,
-            category=feed_info["category"],
+            category=article_category,
             country=feed_info["country"],
             published_at=parse_published_at(entry),
             content=content,
