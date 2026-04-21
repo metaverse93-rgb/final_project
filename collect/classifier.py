@@ -231,7 +231,7 @@ def classify(
     title: str,
     content: str,
     fallback_category: str = "AI 서비스·제품",
-    use_ollama: bool = False,
+    use_ollama: bool = True,
 ) -> str:
     """
     기사 카테고리 분류 메인 함수.
