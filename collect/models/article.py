@@ -20,6 +20,7 @@ class Article:
     content: str = ""
     credibility_score: float = 0.0
     source_type: str = "media"          # 'media' | 'community'
+    keywords: list = field(default_factory=list)
     url_hash: str = field(init=False)
 
     def __post_init__(self):

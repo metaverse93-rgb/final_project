@@ -1,24 +1,25 @@
 """
 三鮮 (삼선) - 메인 실행 진입점
-cron으로 1시간마다 실행: 0 * * * * python main.py
+cron으로 1시간마다 실행: 0 * * * * python collect/main.py
 
 실행 흐름:
-  1. DB 초기화
-  2. RSS 전체 수집 + AI 필터링
-  3. 신뢰도 스코어 반영 후 저장
-  4. 크롤링 로그 기록
-  5. 어드민 통계 출력
+  1. RSS 전체 수집 + AI 필터링 + 신뢰도 스코어
+  2. 기사별 번역 + 요약 (Qwen3.5:4b via Ollama)
+  3. Supabase 배치 upsert (팩트체크 + 임베딩 포함)
 """
 
 import logging
 import sys
 import os
 
+# collect/ 디렉토리 (crawler, models, classifier 임포트용)
 sys.path.insert(0, os.path.dirname(__file__))
+# 프로젝트 루트 (backend, pipeline 임포트용)
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from db.database import init_db, save_articles, save_crawl_log
-from crawler.rss_crawler import RSS_FEEDS, parse_feed
-from admin.stats import show_collection_stats
+from crawler.rss_crawler import fetch_all
+from pipeline.translate_summarize import translate_and_summarize, estimate_sentences
+from backend.save_articles import save_articles
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,33 +28,54 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def run(db_path: str = "samsun.db"):
+def run():
     logger.info("=" * 50)
     logger.info("三鮮 RSS 크롤러 시작")
     logger.info("=" * 50)
 
-    # 1. DB 초기화
-    conn = init_db(db_path)
-    total_saved = 0
+    # 1. RSS 전체 수집
+    articles = fetch_all()
+    logger.info(f"수집 완료: {len(articles)}건")
 
-    # 2. 피드별 수집 + 저장
-    for feed_info in RSS_FEEDS:
-        source = feed_info["source"]
+    if not articles:
+        logger.info("신규 기사 없음 — 종료")
+        return
+
+    # 2. 번역 + 요약 → 배치 딕셔너리 구성
+    batch = []
+    for i, article in enumerate(articles, 1):
+        logger.info(f"[{i}/{len(articles)}] 번역·요약 중: {article.title[:60]}")
         try:
-            articles = parse_feed(feed_info)
-            saved = save_articles(conn, articles)
-            total_saved += saved
-            save_crawl_log(conn, source, "success", saved)
-            logger.info(f"[{source}] 신규 저장: {saved}건")
+            n = estimate_sentences(article.content)
+            result = translate_and_summarize(
+                text=article.content,
+                title=article.title,
+                summary_sentences=n,
+            )
         except Exception as e:
-            save_crawl_log(conn, source, "error", 0, str(e))
-            logger.error(f"[{source}] 오류: {e}")
+            logger.error(f"번역·요약 실패 ({article.source}): {e}")
+            result = {"title_ko": "", "translation": "", "summary_formal": "", "summary_casual": ""}
 
-    logger.info(f"\n✅ 수집 완료 — 총 신규 기사: {total_saved}건") 
-    conn.close()
+        batch.append({
+            "url":               article.url,
+            "title":             article.title,
+            "title_ko":          result.get("title_ko", ""),
+            "source":            article.source,
+            "source_type":       article.source_type,
+            "category":          article.category,
+            "country":           article.country,
+            "keywords":          article.keywords,
+            "published_at":      article.published_at,
+            "content":           article.content,
+            "credibility_score": article.credibility_score,
+            "translation":       result.get("translation", ""),
+            "summary_formal":    result.get("summary_formal", ""),
+            "summary_casual":    result.get("summary_casual", ""),
+        })
 
-    # 5. 어드민 통계 출력
-    show_collection_stats(db_path)
+    # 3. Supabase 저장 (팩트체크 + 임베딩 포함)
+    saved = save_articles(batch)
+    logger.info(f"저장 완료: {saved}건")
 
 
 if __name__ == "__main__":
