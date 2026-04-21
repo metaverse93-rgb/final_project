@@ -103,12 +103,16 @@ def save_articles(articles: list[dict]) -> int:
         else:
             fact_label = infer_fact_label(score)
 
-        embedding = make_embedding(a.get("translation", ""))
+        title_ko   = a.get("title_ko") or ""
+        translation = a.get("translation") or ""
+        # 한국어 제목 + 한국어 번역 합산 임베딩 (검색 품질 향상)
+        embedding = make_embedding(f"{title_ko}\n{translation}" if title_ko else translation)
 
         batch.append({
             "url_hash":          url_hash,
             "url":               url,
-            "title":             a.get("title_ko") or title,  # 한국어 제목 우선, 없으면 영문 원제
+            "title":             title_ko or title,  # 한국어 제목 우선, 없으면 영문 원제
+            "title_en":          title,
             "source":            source,
             "source_type":       source_type,
             "category":          a.get("category"),
@@ -120,9 +124,10 @@ def save_articles(articles: list[dict]) -> int:
             "credibility_score": score,
             "fact_label":        fact_label,
             "needs_review":      fact_label == "UNVERIFIED",
-            "translation":       a.get("translation"),
+            "translation":       translation,
             "summary_formal":    a.get("summary_formal"),
             "summary_casual":    a.get("summary_casual"),
+            "summary_en":        a.get("summary_en"),
             "embedding":         embedding,
         })
 

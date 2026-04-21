@@ -1,7 +1,7 @@
 import os
-import requests
 from dotenv import load_dotenv
 from supabase import create_client
+from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
@@ -10,23 +10,18 @@ sb = create_client(
     os.getenv("SUPABASE_KEY")
 )
 
-OLLAMA_URL  = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").replace("/v1", "")
-EMBED_MODEL = "qwen3-embedding:0.6b"
-
-
-def make_embedding(text: str) -> list[float]:
-    resp = requests.post(
-        f"{OLLAMA_URL}/api/embeddings",
-        json={"model": EMBED_MODEL, "prompt": text},
-    )
-    resp.raise_for_status()
-    return resp.json()["embedding"][:1024]
+model = SentenceTransformer("Qwen/Qwen3-Embedding-4B")
 
 
 # ── 1. 유저 온보딩 ──────────────────────────────
 def save_user(user_id: str, interest_tags: list[str]):
-    combined    = " ".join(interest_tags)
-    user_vector = make_embedding(combined)
+    # 관심사 태그를 하나의 문장으로 합쳐서 임베딩
+    combined = " ".join(interest_tags)
+    user_vector = model.encode(
+        combined,
+        prompt_name="query",
+        normalize_embeddings=True
+    ).tolist()[:1024]
 
     sb.table("users").upsert({
         "user_id":       user_id,
@@ -39,6 +34,7 @@ def save_user(user_id: str, interest_tags: list[str]):
 
 # ── 2. 피드 추천 ──────────────────────────────
 def get_feed(user_id: str, top_k: int = 10):
+    # 유저 벡터 불러오기
     result = sb.table("users") \
                .select("user_vector") \
                .eq("user_id", user_id) \
@@ -46,6 +42,7 @@ def get_feed(user_id: str, top_k: int = 10):
 
     user_vector = result.data[0]["user_vector"]
 
+    # pgvector 유사도 검색
     result = sb.rpc("match_articles", {
         "query_vector": user_vector,
         "top_k":        top_k,
@@ -56,11 +53,13 @@ def get_feed(user_id: str, top_k: int = 10):
 
 # ── 3. 테스트 ──────────────────────────────
 if __name__ == "__main__":
+    # 테스트 유저 저장
     save_user(
         user_id="550e8400-e29b-41d4-a716-446655440099",
         interest_tags=["LLM", "반도체", "AI 스타트업"]
     )
 
+    # 피드 추천
     feed = get_feed("550e8400-e29b-41d4-a716-446655440099")
     for article in feed:
         print(article)
