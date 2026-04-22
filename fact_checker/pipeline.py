@@ -10,12 +10,14 @@ fact_checker/pipeline.py — 팩트체크 파이프라인 오케스트레이터 
   § 9: Confidence 집계 — Guo et al. TACL 2022
 
 파이프라인 흐름:
-  Step 0: 채널 신뢰도 기반 DROP 분류
+  Step 0: 채널 신뢰도 기반 DROP 분류 + SNS 소스 특수 라우팅
   Step 1: 루머 신호 패턴 탐지 → FACT_AUTO or RUMOR
+           (INFLUENCER_VERIFIED·SOCIAL_UNVERIFIED는 Step 1 건너뜀)
   Step 2: Google Fact Check API (~15.8% 매칭)
-  Step 3A: Gemini Advisor + Google Search Grounding (전체 미매칭, signal_detector 결과 활용)
+  Step 3A: Gemini Advisor + Google Search Grounding
   Step 3B: Chain-of-Verification (confidence 0.50~0.79 구간)
   Step 3C: DebateCV 3-에이전트 (importance_score ≥ 0.7 AND 불확실)
+  크로스 소스 부스트: TIER 1 언론사 2개 이상 동일 claim 보도 시 신뢰도 상향
 
 외부 진입점:
   run_fact_check(title, content, source, source_type) → FactCheckResult
@@ -29,6 +31,7 @@ from .channel_config import get_profile, should_drop, ChannelTier
 from .signal_detector import detect as detect_signals, SignalResult
 from . import google_fc_api
 from .debate_agents import compute_importance_score
+from .cross_source import cross_source_boost
 
 logger = logging.getLogger(__name__)
 
@@ -89,17 +92,19 @@ def run_fact_check(
     source_type: str,
     skip_fc_api: bool = False,
     skip_llm: bool = False,
+    all_sources_for_claim: list[str] | None = None,
 ) -> FactCheckResult:
     """
     팩트체크 파이프라인 실행.
 
     Args:
-        title:        기사 제목 (영문)
-        content:      기사 본문 (영문)
-        source:       출처 이름 (RSS_FEEDS의 source 필드)
-        source_type:  "media" | "community"
-        skip_fc_api:  True이면 Step 2 Google FC API 건너뜀 (테스트용)
-        skip_llm:     True이면 Step 3 전체 건너뜀 (테스트용)
+        title:                  기사 제목 (영문)
+        content:                기사 본문 (영문)
+        source:                 출처 이름 (RSS_FEEDS의 source 필드)
+        source_type:            "media" | "community" | "influencer" | "social"
+        skip_fc_api:            True이면 Step 2 Google FC API 건너뜀 (테스트용)
+        skip_llm:               True이면 Step 3 전체 건너뜀 (테스트용)
+        all_sources_for_claim:  동일 claim을 보도한 전체 소스 목록 (크로스 소스 검증용)
 
     Returns:
         FactCheckResult
@@ -115,64 +120,105 @@ def run_fact_check(
             fact_label="DROP", confidence=1.0,
             tier=tier, step_reached=0,
             verification_method="auto",
-            reasoning_trace=f"채널 등급 DROP: {tier.value}",
+            reasoning_trace=f"채널 등급 DROP: {tier}",
         )
 
-    # ── Step 1: 루머/의견 신호 탐지 ─────────────────────────────────────
-    # 근거: Wang ACL 2017 (LIAR) — 헤징 표현이 PANTS-ON-FIRE와 유의미한 상관
-    signal = detect_signals(
-        title=title,
-        content=content,
-        source_type=source_type,
-        current_tier=tier,
-    )
+    # ── SOCIAL_UNVERIFIED (TIER 5): 텔레그램·익명채널 — 기본 RUMOR ──────
+    # 크로스 소스 검증 없으면 RUMOR 고정. 있으면 confidence 부스트 후 파이프라인 진행.
+    if tier == "SOCIAL_UNVERIFIED":
+        boost = cross_source_boost(title, all_sources_for_claim or [])
+        boosted_conf = round(min(profile.credibility_score + boost, 1.0), 4)
+        if boost < 0.10:
+            # TIER 1 독립 보도 없음 → RUMOR 고정
+            return FactCheckResult(
+                fact_label="RUMOR", confidence=boosted_conf,
+                tier=tier, step_reached=0,
+                verification_method="auto",
+                reasoning_trace=(
+                    f"SOCIAL_UNVERIFIED 소스, 크로스 소스 미확인 → RUMOR "
+                    f"(base={profile.credibility_score}, boost={boost})"
+                ),
+            )
+        # 크로스 소스 충분 → UNVERIFIED로 승격하여 파이프라인 계속
+        logger.info(
+            f"[Pipeline] SOCIAL_UNVERIFIED 크로스 소스 부스트 +{boost:.2f} → 파이프라인 진행"
+        )
+        tier = "COMMUNITY_HIGH_SIGNAL"   # 파이프라인 내부 처리용 tier 임시 승격
 
-    if signal.tier_override:
-        tier = signal.tier_override
-
-    if should_drop(tier):
-        return FactCheckResult(
-            fact_label="DROP", confidence=0.90,
-            tier=tier, step_reached=1,
-            signal=signal, matched_patterns=signal.matched_patterns,
-            verification_method="auto",
-            reasoning_trace=f"Opinion 패턴 탐지 → DROP: {signal.matched_patterns[:3]}",
+    # ── INFLUENCER_VERIFIED (TIER 3): 유튜브 — Step 1 건너뜀 ───────────
+    # 동영상 자막 특성상 패턴 탐지 신뢰도 낮음 → 항상 Step 2 이상 검증.
+    signal = None
+    if tier == "INFLUENCER_VERIFIED":
+        logger.info(f"[Pipeline] INFLUENCER_VERIFIED → Step 1 건너뜀, Step 2 직행")
+    else:
+        # ── Step 1: 루머/의견 신호 탐지 ─────────────────────────────────
+        # 근거: Wang ACL 2017 (LIAR) — 헤징 표현이 PANTS-ON-FIRE와 유의미한 상관
+        signal = detect_signals(
+            title=title,
+            content=content,
+            source_type=source_type,
+            current_tier=tier,
         )
 
-    # MEDIA_CREDIBLE_LEAK는 소식통 인용이 잦은 출처 — 루머 신호 없어도 LLM 검증 필요
-    if signal.fact_label_hint == "FACT_AUTO" and tier != "MEDIA_CREDIBLE_LEAK":
-        return FactCheckResult(
-            fact_label="FACT", confidence=profile.credibility_score,
-            tier=tier, step_reached=1,
-            signal=signal,
-            verification_method="auto",
-            reasoning_trace=f"공식 미디어 + 루머 신호 없음 → FACT_AUTO (신뢰도 {profile.credibility_score})",
-        )
+        if signal.tier_override:
+            tier = signal.tier_override
 
-    if signal.fact_label_hint == "RUMOR" and skip_fc_api:
-        return FactCheckResult(
-            fact_label="RUMOR", confidence=0.80,
-            tier=tier, step_reached=1,
-            signal=signal, matched_patterns=signal.matched_patterns,
-            verification_method="auto",
-            reasoning_trace=f"강한 루머 신호 탐지: {signal.matched_patterns[:3]}",
-        )
+        if should_drop(tier):
+            return FactCheckResult(
+                fact_label="DROP", confidence=0.90,
+                tier=tier, step_reached=1,
+                signal=signal, matched_patterns=signal.matched_patterns,
+                verification_method="auto",
+                reasoning_trace=f"Opinion 패턴 탐지 → DROP: {signal.matched_patterns[:3]}",
+            )
+
+        # MEDIA_CREDIBLE_LEAK는 소식통 인용이 잦은 출처 — 루머 신호 없어도 LLM 검증 필요
+        if signal.fact_label_hint == "FACT_AUTO" and tier not in (
+            "MEDIA_CREDIBLE_LEAK", "COMMUNITY_HIGH_SIGNAL"
+        ):
+            boost = cross_source_boost(title, all_sources_for_claim or [])
+            return FactCheckResult(
+                fact_label="FACT",
+                confidence=round(min(profile.credibility_score + boost, 1.0), 4),
+                tier=tier, step_reached=1,
+                signal=signal,
+                verification_method="auto",
+                reasoning_trace=(
+                    f"공식 미디어 + 루머 신호 없음 → FACT_AUTO "
+                    f"(신뢰도 {profile.credibility_score}, 크로스 소스 +{boost:.2f})"
+                ),
+            )
+
+        if signal.fact_label_hint == "RUMOR" and skip_fc_api:
+            return FactCheckResult(
+                fact_label="RUMOR", confidence=0.80,
+                tier=tier, step_reached=1,
+                signal=signal, matched_patterns=signal.matched_patterns,
+                verification_method="auto",
+                reasoning_trace=f"강한 루머 신호 탐지: {signal.matched_patterns[:3]}",
+            )
 
     # ── Step 2: Google Fact Check API ───────────────────────────────────
     # 근거: ClaimReview Schema — 200+ 팩트체킹 기관 DB, AI 뉴스 ~15.8% 매칭
+    matched_pats = signal.matched_patterns if signal else []
     fc = None
     if not skip_fc_api:
         fc = google_fc_api.query(title)
         if fc.matched and fc.verdict != "NO_MATCH":
+            boost = cross_source_boost(title, all_sources_for_claim or [])
+            boosted_conf = round(min(fc.confidence + boost, 1.0), 4)
             return FactCheckResult(
-                fact_label=fc.verdict, confidence=fc.confidence,
+                fact_label=fc.verdict, confidence=boosted_conf,
                 tier=tier, step_reached=2,
                 signal=signal, fc_result=fc,
                 evidence_url=fc.evidence_url,
                 evidence_publisher=fc.publisher,
-                matched_patterns=signal.matched_patterns,
+                matched_patterns=matched_pats,
                 verification_method="google_fc",
-                reasoning_trace=f"Google FC API 매칭: {fc.publisher} → {fc.verdict}",
+                reasoning_trace=(
+                    f"Google FC API 매칭: {fc.publisher} → {fc.verdict} "
+                    f"(크로스 소스 +{boost:.2f})"
+                ),
             )
 
     if skip_llm:
@@ -180,7 +226,7 @@ def run_fact_check(
             fact_label="UNVERIFIED", confidence=0.50,
             tier=tier, step_reached=2,
             signal=signal, fc_result=fc,
-            matched_patterns=signal.matched_patterns if signal else [],
+            matched_patterns=matched_pats,
             verification_method="skip",
             reasoning_trace="LLM 단계 건너뜀 (skip_llm=True)",
         )
@@ -208,7 +254,7 @@ def run_fact_check(
                 confidence=gemini_result.confidence,
                 tier=tier, step_reached=3,
                 signal=signal, fc_result=fc,
-                matched_patterns=signal.matched_patterns if signal else [],
+                matched_patterns=matched_pats,
                 verification_method="gemini",
                 importance_score=importance,
                 reasoning_trace=gemini_result.reasoning,
@@ -239,7 +285,7 @@ def run_fact_check(
                 confidence=cove_result.confidence,
                 tier=tier, step_reached=3,
                 signal=signal, fc_result=fc,
-                matched_patterns=signal.matched_patterns if signal else [],
+                matched_patterns=matched_pats,
                 verification_method="cove",
                 importance_score=importance,
                 reasoning_trace=cove_result.reasoning,
@@ -257,7 +303,7 @@ def run_fact_check(
                 fact_label=prior_verdict, confidence=prior_confidence,
                 tier=tier, step_reached=3,
                 signal=signal, fc_result=fc,
-                matched_patterns=signal.matched_patterns if signal else [],
+                matched_patterns=matched_pats,
                 verification_method="gemini",
                 importance_score=importance,
                 reasoning_trace=prior_reasoning,
@@ -274,27 +320,32 @@ def run_fact_check(
         )
         debate_result = debate_run(title, content, prior_verdict, prior_confidence)
 
+        boost = cross_source_boost(title, all_sources_for_claim or [])
+        boosted_conf = round(min(debate_result.confidence + boost, 1.0), 4)
         return FactCheckResult(
             fact_label=debate_result.verdict,
-            confidence=debate_result.confidence,
+            confidence=boosted_conf,
             tier=tier, step_reached=3,
             signal=signal, fc_result=fc,
-            matched_patterns=signal.matched_patterns if signal else [],
+            matched_patterns=matched_pats,
             verification_method="debate",
             importance_score=importance,
             reasoning_trace=(
-                f"[DebateCV {debate_result.debate_outcome}] {debate_result.judge_reasoning}"
+                f"[DebateCV {debate_result.debate_outcome}] {debate_result.judge_reasoning} "
+                f"(크로스 소스 +{boost:.2f})"
             ),
         )
 
     except Exception as e:
         logger.error(f"[Pipeline] Step 3C 실패: {e}")
+        boost = cross_source_boost(title, all_sources_for_claim or [])
         return FactCheckResult(
-            fact_label=prior_verdict, confidence=prior_confidence,
+            fact_label=prior_verdict,
+            confidence=round(min(prior_confidence + boost, 1.0), 4),
             tier=tier, step_reached=3,
             signal=signal, fc_result=fc,
-            matched_patterns=signal.matched_patterns if signal else [],
+            matched_patterns=matched_pats,
             verification_method="cove",
             importance_score=importance,
-            reasoning_trace=f"DebateCV 실패 → CoVe 결과 사용: {prior_reasoning}",
+            reasoning_trace=f"DebateCV 실패 → CoVe 결과 사용: {prior_reasoning} (크로스 소스 +{boost:.2f})",
         )
