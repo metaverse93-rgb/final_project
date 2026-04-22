@@ -99,6 +99,20 @@ If no title is provided, set "title_ko" to "".
 
 
 # ────────────────────────────────────────────────
+# Summary-Only Prompt (번역 토큰 초과 시 별도 호출용)
+# SYSTEM_PROMPT보다 훨씬 짧게 유지 — 토큰 예산 여유 확보가 목적
+# ────────────────────────────────────────────────
+SUMMARY_ONLY_PROMPT = (
+    "Korean summarizer. Return ONLY valid JSON, no markdown:\n"
+    '{{"summary_formal":"<{n} sentence(s), ~습니다/됩니다 style>","summary_casual":"<{n} sentence(s), ~해요/거예요 style>"}}\n'
+    "Rules: Korean only. Both fields required. No empty values."
+)
+
+# 요약 전용 호출에서 번역문 입력 최대 길이 (토큰 예산 보호)
+_SUMMARY_INPUT_MAX = 2500
+
+
+# ────────────────────────────────────────────────
 # Sentence Estimator
 # ────────────────────────────────────────────────
 def estimate_sentences(text: str, max_sentences: int = 3) -> int:
@@ -162,15 +176,63 @@ def translate_and_summarize(
             think=False,  # thinking 모드 비활성화 (qwen3.5:4b 전용)
         )
         result = _extract_json(response.message.content)
-        if "(파싱 실패)" not in result.get("summary_formal", ""):
+        if result.get("summary_formal") and "(파싱 실패)" not in result["summary_formal"]:
             return result
 
-    return result  # 3회 실패 시 마지막 결과 반환
+    # ── 번역은 됐는데 summary만 잘린 경우 → summary-only 재호출 ──────────
+    # SYSTEM_PROMPT가 길어서 장문 번역 후 토큰 예산이 소진될 때 발생.
+    # 번역문을 입력으로 주는 짧은 프롬프트로 summary만 별도 생성.
+    if result.get("translation"):
+        summary = _retry_summary_only(result["translation"], summary_sentences)
+        result["summary_formal"] = summary.get("summary_formal", "")
+        result["summary_casual"] = summary.get("summary_casual", "")
+
+    return result
 
 
 def _extract_json(text: str) -> dict:
     """pipeline.utils.extract_json 위임 (하위 호환용 래퍼)"""
     return _extract_json_util(text)
+
+
+def _retry_summary_only(translation: str, n: int) -> dict:
+    """
+    번역은 성공했지만 summary 필드가 잘린 경우 summary만 별도 호출.
+
+    SYSTEM_PROMPT 대신 SUMMARY_ONLY_PROMPT(매우 짧음)를 사용해
+    토큰 예산을 summary 생성에만 집중.
+    """
+    prompt = SUMMARY_ONLY_PROMPT.format(n=n)
+    # 번역문이 길면 앞부분만 사용 (핵심은 초반에 집중)
+    ko_input = translation[:_SUMMARY_INPUT_MAX]
+
+    for _ in range(2):
+        try:
+            response = ollama.chat(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user",   "content": ko_input},
+                ],
+                options={
+                    "temperature": 0.1,
+                    "num_predict": 600,   # summary 2필드만 생성 — 짧게 제한
+                    "num_ctx":     4096,
+                    "num_gpu":     99,
+                },
+                think=False,
+            )
+            raw = _extract_json_util(response.message.content)
+            # summary_formal / summary_casual 만 반환 (translation 덮어쓰기 방지)
+            if raw.get("summary_formal"):
+                return {
+                    "summary_formal": raw.get("summary_formal", ""),
+                    "summary_casual": raw.get("summary_casual", ""),
+                }
+        except Exception:
+            pass
+
+    return {"summary_formal": "", "summary_casual": ""}
 
 
 # ────────────────────────────────────────────────

@@ -103,10 +103,17 @@ def save_articles(articles: list[dict]) -> int:
         else:
             fact_label = infer_fact_label(score)
 
-        title_ko   = a.get("title_ko") or ""
+        title_ko    = a.get("title_ko") or ""
         translation = a.get("translation") or ""
-        # 한국어 제목 + 한국어 번역 합산 임베딩 (검색 품질 향상)
-        embedding = make_embedding(f"{title_ko}\n{translation}" if title_ko else translation)
+
+        # 임베딩 — 실패 시 해당 기사만 NULL로 저장, 나머지 batch 정상 유지
+        # (CUDA OOM 후 Ollama가 OOM 상태일 때 embedding 호출도 실패할 수 있음)
+        embed_text = f"{title_ko}\n{translation}" if title_ko else translation
+        try:
+            embedding = make_embedding(embed_text) if embed_text.strip() else None
+        except Exception as e:
+            print(f"[WARN] 임베딩 실패 ({url[:60]}): {e} → NULL로 저장")
+            embedding = None
 
         batch.append({
             "url_hash":          url_hash,
