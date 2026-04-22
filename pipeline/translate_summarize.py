@@ -153,9 +153,11 @@ def translate_and_summarize(
                 {"role": "user", "content": user_content},
             ],
             options={
-                "temperature": 0.1,
-                "num_predict": -1,   # 무제한 — EOS 토큰까지 생성
-                "num_gpu": 99,
+                "temperature":    0.1,
+                "num_predict":    -1,    # 무제한 — EOS까지 생성 (repeat_penalty로 루프 방지)
+                "num_ctx":        12288, # 8192→12288: 장문(6000자+) 번역 후 요약 공간 확보
+                "num_gpu":        99,
+                "repeat_penalty": 1.15,  # 반복 토큰 루프 방지 (id=132 재발 방지)
             },
             think=False,  # thinking 모드 비활성화 (qwen3.5:4b 전용)
         )

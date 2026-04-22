@@ -68,8 +68,12 @@ def _extract_raw(text: str) -> dict[str, str]:
             for end_pat in (
                 f'", "{next_f}"',
                 f'",\n"{next_f}"',
-                f'",\n  "{next_f}"',
+                f'",\n  "{next_f}"',    # 2칸 들여쓰기
+                f'",\n    "{next_f}"',  # 4칸 들여쓰기
+                f'",\n\t"{next_f}"',    # 탭 들여쓰기
                 f'",\r\n"{next_f}"',
+                f'",\r\n  "{next_f}"',
+                f'",\r\n    "{next_f}"',
             ):
                 ep = text.find(end_pat, content_start)
                 if ep != -1:
@@ -78,7 +82,7 @@ def _extract_raw(text: str) -> dict[str, str]:
 
         if content_end is None:
             # 마지막 필드 또는 경계 못 찾은 경우
-            for end_pat in ('"}', '" }', '"\n}'):
+            for end_pat in ('"}', '" }', '"\n}', '"\r\n}'):
                 ep = text.rfind(end_pat, content_start)
                 if ep > content_start:
                     content_end = ep

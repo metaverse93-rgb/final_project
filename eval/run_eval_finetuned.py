@@ -40,8 +40,9 @@ SHEET_NAME     = "파인튜닝_8ep"
 BASE_MODEL_ID  = "unsloth/Qwen3.5-4B"
 MODEL_VERSION  = "qwen3.5-4b-finetuned-8ep"
 
-MAX_NEW_TOKENS_TRANS   = 1024
+MAX_NEW_TOKENS_TRANS   = 1500   # 1024→1500: 장문 기사 번역 잘림 방지
 MAX_NEW_TOKENS_SUMMARY = 256
+MAX_INPUT_CHARS        = 3500   # RTX 3070 8GB VRAM 보호 (en ~875토큰 상한)
 
 # ── 학습 시 사용한 시스템 프롬프트 (trainset_chat.jsonl과 동일) ──
 TRANSLATE_SYSTEM = (
@@ -165,6 +166,9 @@ def _clean_output(text: str) -> str:
 
 
 def translate(model, tokenizer, en_text: str) -> str:
+    # 긴 기사 선제 트런케이션 — RTX 3070 VRAM 보호
+    if len(en_text) > MAX_INPUT_CHARS:
+        en_text = en_text[:MAX_INPUT_CHARS]
     messages = [
         {"role": "system", "content": TRANSLATE_SYSTEM},
         {"role": "user",   "content": en_text},
@@ -176,6 +180,12 @@ def translate(model, tokenizer, en_text: str) -> str:
 def summarize(model, tokenizer, en_text: str, ko_text: str) -> str:
     # 원문(EN) + 번역문(KO) 동시 제공 → Relevance 향상
     # (G-Eval 논문: source alignment가 Relevance 핵심 요인)
+    # 합산 입력이 길어지므로 각각 절반씩 상한 적용
+    half = MAX_INPUT_CHARS // 2
+    if len(en_text) > half:
+        en_text = en_text[:half]
+    if len(ko_text) > half:
+        ko_text = ko_text[:half]
     user_content = f"[영어 원문]\n{en_text}\n\n[한국어 번역문]\n{ko_text}"
     messages = [
         {"role": "system", "content": SUMMARIZE_SYSTEM},
@@ -340,6 +350,14 @@ def run_eval(limit: int = None, skip_geval: bool = False,
             # ── 1. 번역 ──
             try:
                 translation = translate(model, tokenizer, en_text)
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                print(f"  ⚠ CUDA OOM — 입력 1500자로 단축 후 재시도")
+                try:
+                    translation = translate(model, tokenizer, en_text[:1500])
+                except Exception as e2:
+                    print(f"  ⚠ 재시도 실패: {e2}")
+                    translation = ""
             except Exception as e:
                 print(f"  ⚠ 번역 오류: {e}")
                 translation = ""
@@ -349,6 +367,13 @@ def run_eval(limit: int = None, skip_geval: bool = False,
             if translation:
                 try:
                     summary_formal = summarize(model, tokenizer, en_text, translation)
+                except torch.cuda.OutOfMemoryError:
+                    torch.cuda.empty_cache()
+                    print(f"  ⚠ 요약 CUDA OOM — 입력 단축 후 재시도")
+                    try:
+                        summary_formal = summarize(model, tokenizer, en_text[:800], translation[:800])
+                    except Exception as e2:
+                        print(f"  ⚠ 요약 재시도 실패: {e2}")
                 except Exception as e:
                     print(f"  ⚠ 요약 오류: {e}")
 
@@ -402,6 +427,9 @@ def run_eval(limit: int = None, skip_geval: bool = False,
             f.flush()
 
             print(f"  BLEU={bleu:.1f}  COMET={comet_score:.4f}  TPR={tpr*100:.1f}%  G-Eval={geval_avg:.1f}  G-Eval(W)={geval_weighted:.1f}")
+
+            # 기사 단위 VRAM 해제 — 누적 단편화 방지
+            torch.cuda.empty_cache()
 
     print(f"\n결과 저장 완료: {RESULTS_PATH}")
     print_summary(RESULTS_PATH)

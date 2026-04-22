@@ -46,9 +46,12 @@ def run():
     for i, article in enumerate(articles, 1):
         logger.info(f"[{i}/{len(articles)}] 번역·요약 중: {article.title[:60]}")
         try:
-            n = estimate_sentences(article.content)
+            # num_ctx=8192 초과 방지: 시스템 프롬프트(~375토큰) + 출력(~2000토큰) 감안
+            # 10000자 ≈ 2500토큰 → 합계 ~4875토큰으로 8192 내 안전
+            content = article.content[:10000] if len(article.content) > 10000 else article.content
+            n = estimate_sentences(content)
             result = translate_and_summarize(
-                text=article.content,
+                text=content,
                 title=article.title,
                 summary_sentences=n,
             )
