@@ -153,13 +153,14 @@ def _call_gemini_pass_b(
     signal_strength: str,
     signal_patterns: list,
     client,
-) -> dict:
+) -> tuple[dict, bool]:
     """
     Google Search Grounding + 상식 추론.
-    근거: Gemini API google_search tool — 실시간 검색 결과를 컨텍스트에 주입.
-    signal_detector 결과를 컨텍스트로 주입 (Pass A 대체).
-    최대 2회 retry.
+    Gemini quota 소진 시 OpenRouter(gpt-4.1-mini)로 자동 fallback.
+    Returns: (parsed_dict, used_fallback)
     """
+    from .llm_client import call_with_fallback
+
     prompt = PASS_B_USER.format(
         title=title,
         content=content[:2000],
@@ -168,27 +169,21 @@ def _call_gemini_pass_b(
     )
 
     for attempt in range(2):
-        # Google Search Grounding 활성화 (google-genai SDK)
-        # system_instruction 분리: Grounding 사용 시 역할 지시 명확화
-        # thinking_budget=0: JSON 출력 토큰 확보 (Pass B는 Grounding 응답이 길어질 수 있음)
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=PASS_B_SYSTEM,
-                temperature=0.2,
-                max_output_tokens=1024,
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
+        text, used_fallback = call_with_fallback(
+            system=PASS_B_SYSTEM,
+            user=prompt,
+            gemini_client=client,
+            temperature=0.2,
+            max_tokens=1024,
+            use_grounding=True,   # Gemini면 Grounding, fallback이면 무시됨
         )
         try:
-            return _extract_json(response.text)
+            return _extract_json(text), used_fallback
         except json.JSONDecodeError:
             if attempt == 1:
                 raise
             logger.warning("[Pass B] JSON 파싱 실패, retry...")
-    return {}
+    return {}, used_fallback
 
 
 def _mock_run(title: str) -> GeminiResult:
@@ -236,12 +231,14 @@ def run(
         # ── Google Search Grounding + 추론 ─────────────────
         # signal_detector 결과를 컨텍스트로 주입
         logger.info(f"[Gemini] '{title[:50]}' (signal={signal_strength}, with Google Search)")
-        pass_b = _call_gemini_pass_b(title, content, signal_strength, signal_patterns or [], client)
+        pass_b, used_fallback = _call_gemini_pass_b(title, content, signal_strength, signal_patterns or [], client)
 
         verdict = pass_b.get("verdict", "UNVERIFIED")
         confidence = float(pass_b.get("confidence", 0.50))
         reasoning = pass_b.get("reasoning", "")
-        search_queries = pass_b.get("search_queries_used", [])
+        search_queries = [] if used_fallback else pass_b.get("search_queries_used", [])
+        if used_fallback:
+            reasoning += " [OpenRouter fallback — Grounding 미적용]"
 
         # 강한 루머 신호 감지 시 confidence 하향 보정
         if signal_strength == "STRONG" and confidence > 0.70:

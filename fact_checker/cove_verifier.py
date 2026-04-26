@@ -32,12 +32,9 @@ logger = logging.getLogger(__name__)
 
 try:
     from google import genai
-    from google.genai import types
     _GENAI_AVAILABLE = True
 except ImportError:
     _GENAI_AVAILABLE = False
-
-GEMINI_MODEL = "gemini-2.5-flash"
 
 
 # ── 결과 데이터 클래스 ───────────────────────────────────────────────────
@@ -178,23 +175,21 @@ def _extract_json(text: str) -> dict:
 
 
 def _call(system: str, user: str, client, temperature: float = 0.1, max_tokens: int = 1024) -> dict:
-    """Gemini 호출 + JSON 파싱. 최대 2회 retry.
-    system_instruction 분리로 Gemini가 역할 지시를 시스템 레벨로 인식.
-    thinking_budget=0: gemini-2.5-flash 기본 thinking이 output 토큰 소비하여 JSON 잘림 방지.
-    """
+    """LLM 호출 + JSON 파싱. Gemini quota 소진 시 OpenRouter fallback. 최대 2회 retry."""
+    from .llm_client import call_with_fallback
+
     for attempt in range(2):
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=user,
-            config=types.GenerateContentConfig(
-                system_instruction=system,
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
+        text, used_fallback = call_with_fallback(
+            system=system,
+            user=user,
+            gemini_client=client,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
+        if used_fallback:
+            logger.info("[CoVe] OpenRouter fallback 사용")
         try:
-            return _extract_json(response.text)
+            return _extract_json(text)
         except json.JSONDecodeError:
             if attempt == 1:
                 raise
