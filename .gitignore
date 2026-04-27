@@ -9,6 +9,7 @@ __pycache__/
 *.docx
 *.json
 token.json
+client_secret*.json
 
 # 파인튜닝 모델 (용량 큼)
 samsunmodel*/
