@@ -134,9 +134,32 @@ def extract_json(text: str) -> dict:
         obj = json.loads(repaired)
         return {f: obj.get(f, "") for f in _FIELDS}
 
-    # ── 3단계: 절대 최후 수단 ────────────────────────────────
+    # ── 3단계: 필드별 regex 추출 (Gemma 등 비표준 출력 대응) ─────
+    # JSON 키-값 패턴으로 각 필드를 독립 추출 (구조 손상 무관)
+    regex_result: dict[str, str] = {}
+    for field in _FIELDS:
+        m = re.search(
+            rf'"{field}"\s*:\s*"((?:[^"\\]|\\.)*)"', text, re.DOTALL
+        )
+        if m:
+            regex_result[field] = (m.group(1)
+                                   .replace('\\"', '"')
+                                   .replace('\\n', '\n')
+                                   .replace('\\\\', '\\'))
+    if regex_result.get("translation"):
+        return {f: regex_result.get(f, "") for f in _FIELDS}
+
+    # ── 4단계: 절대 최후 수단 (JSON 형식 자체가 없는 경우) ───────
+    # 한국어 텍스트 블록이 있으면 translation으로 사용
+    ko_blocks = re.findall(r'[가-힣][^{}"\n]{10,}', text)
+    if ko_blocks:
+        return {
+            "translation":    "\n".join(ko_blocks),
+            "summary_formal": "",
+            "summary_casual": "",
+        }
     return {
-        "translation":    text,
-        "summary_formal": "(파싱 실패)",
-        "summary_casual": "(파싱 실패)",
+        "translation":    "",
+        "summary_formal": "",
+        "summary_casual": "",
     }
