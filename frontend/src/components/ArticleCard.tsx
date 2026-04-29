@@ -99,6 +99,11 @@ export default function ArticleCard({ article, bookmarked = false, onBookmark, o
             RUMOR
           </span>
         )}
+        {factLabel === 'UNVERIFIED' && (
+          <span style={{ fontSize: 10, fontWeight: 600, color: '#D97706', background: '#FEF3C7', padding: '1px 6px', borderRadius: 4 }}>
+            검증중
+          </span>
+        )}
         <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--color-text-tertiary)' }}>{article.timeAgo}</span>
       </div>
 
