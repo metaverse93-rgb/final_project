@@ -1,39 +1,60 @@
 """
-backend/save_articles.py — Supabase DB 연동 함수 모음
+backend/save_articles.py — Supabase DB 저장 함수 모음
 
-테이블: articles / fact_checks / neologisms / eval_results
-실행 전제:
-    - supabase_schema.sql 을 Supabase SQL Editor에서 먼저 실행
-    - .env 에 SUPABASE_URL, SUPABASE_KEY, OLLAMA_BASE_URL 설정
+파이프라인(이동우님)이 번역/요약을 완료한 기사 데이터를
+Supabase에 저장하는 모든 함수를 담당한다.
+
+담당 테이블:
+  articles     — 기사 원본 + 번역/요약 + 임베딩 (메인)
+  neologisms   — AI 신조어 캐시 + 파인튜닝 말뭉치
+  fact_checks  — 팩트체크 세부 기록 (MVP 이후)
+  eval_results — 파인튜닝 전/후 평가 지표 (4주차~)
 """
 
 import os
-import hashlib
-from datetime import datetime, timezone
+import hashlib   # URL을 MD5 해시로 변환할 때 사용
+from datetime import datetime, timezone   # 수집 시각 자동 기록에 사용
 from dotenv import load_dotenv
 from supabase import create_client
+
+# 우리가 만든 임베딩 어댑터 — make_embedding 하나만 import
 from backend.embedder import make_embedding
 
 load_dotenv()
 
-# ── Supabase 클라이언트 ──────────────────────────────────────
+# Supabase 클라이언트 생성
 sb = create_client(
     os.getenv("SUPABASE_URL"),
     os.getenv("SUPABASE_KEY"),
 )
 
 
-# ── 유틸 ────────────────────────────────────────────────────
+# ── 유틸 함수들 ──────────────────────────────────────────────
 
 def make_url_hash(url: str) -> str:
-    """URL → MD5 해시 (articles PK)"""
+    """
+    URL을 MD5 해시로 변환한다.
+    이 값이 articles 테이블의 PK(고유 키)가 된다.
+
+    왜 URL을 직접 PK로 안 쓰냐면:
+    URL이 너무 길고 특수문자가 많아서 DB 성능이 나빠질 수 있기 때문.
+    MD5는 어떤 문자열이든 32자 고정 길이 문자열로 변환해준다.
+
+    예: "https://techcrunch.com/2026/..." → "a3f2c8d1e4b7..."
+    """
     return hashlib.md5(url.encode()).hexdigest()
 
 
 def infer_fact_label(credibility_score: float) -> str:
     """
-    credibility_score 기반 자동 분류 (fallback용).
-    fact_checker 파이프라인이 실패할 경우에만 사용.
+    신뢰도 점수(0.0~1.0)를 3단계 라벨로 자동 분류한다.
+
+    MVP 단계에서는 출처 신뢰도만으로 자동 분류.
+    이후 fact_checks 테이블에 쌓인 데이터로 정교화할 예정.
+
+    0.8 이상 → FACT     (신뢰할 수 있는 기사)
+    0.4 미만 → RUMOR    (루머 가능성 있음)
+    그 외    → UNVERIFIED (확인 필요)
     """
     if credibility_score >= 0.8:
         return "FACT"
@@ -42,141 +63,99 @@ def infer_fact_label(credibility_score: float) -> str:
     return "UNVERIFIED"
 
 
-# ── articles ─────────────────────────────────────────────────
+# ── articles 테이블 저장 ──────────────────────────────────────
 
 def save_articles(articles: list[dict]) -> int:
     """
-    파이프라인 결과를 articles 테이블에 배치 upsert.
-    팩트체크 파이프라인(Step 0~2)을 먼저 실행 후 저장.
+    파이프라인 결과물(번역+요약된 기사 리스트)을 articles 테이블에 저장한다.
+    같은 기사가 다시 들어와도 url_hash 기준으로 중복 저장되지 않는다.
 
-    articles 리스트 각 항목에 필요한 키:
-        url, title, source, source_type, category, country,
-        keywords (list), published_at (ISO 8601 str),
-        content, credibility_score,
-        translation, summary_formal, summary_casual
+    Args:
+        articles: 파이프라인에서 넘어온 기사 딕셔너리 리스트
+                  각 항목에 필요한 키:
+                  url, title, source, source_type, category, country,
+                  keywords, published_at, content, credibility_score,
+                  translation, summary_formal, summary_casual
 
-    Returns: 저장된 건수 (DROP된 기사 제외)
+    Returns:
+        저장된 기사 건수
     """
-    # fact_checker import는 런타임에 — 의존성 없을 때 크래시 방지
-    try:
-        from fact_checker.pipeline import run_fact_check
-        fc_available = True
-    except ImportError:
-        fc_available = False
-        print("[WARN] fact_checker 모듈 없음 — credibility_score 기반 fallback 사용")
-
-    batch = []
-    dropped = 0
+    batch = []   # 한 번에 저장할 데이터를 모아두는 리스트
 
     for a in articles:
-        url          = a.get("url", "")
-        url_hash     = make_url_hash(url)
-        score        = a.get("credibility_score") or 0.5
-        title        = a.get("title", "")
-        content      = a.get("content", "")
-        source       = a.get("source", "")
-        source_type  = a.get("source_type", "media")
+        url   = a.get("url", "")
+        score = a.get("credibility_score") or 0.5   # 신뢰도가 없으면 기본값 0.5
 
-        # ── 팩트체크 파이프라인 (Step 0~2) ──────────────────
-        if fc_available:
-            try:
-                fc_result = run_fact_check(
-                    title=title,
-                    content=content,
-                    source=source,
-                    source_type=source_type,
-                )
+        # 한국어 제목 + 한국어 번역 합산 임베딩
+        title_en = a.get("title_en", "") or ""
+        combined = f"{a.get('title', '')}\n{a.get('translation', '')}"
+        embedding = make_embedding(combined)
 
-                # DROP → DB 저장 안 함
-                if not fc_result.should_save():
-                    dropped += 1
-                    continue
-
-                fact_label = fc_result.fact_label
-
-                # fact_checks 테이블에 결과 기록
-                save_fact_checks(url_hash, [fc_result.to_claim_dict(title)])
-
-            except Exception as e:
-                print(f"[WARN] 팩트체크 오류 ({source}): {e} — fallback 사용")
-                fact_label = infer_fact_label(score)
-        else:
-            fact_label = infer_fact_label(score)
-
-        title_ko    = a.get("title_ko") or ""
-        translation = a.get("translation") or ""
-
-        # 임베딩 — 실패 시 해당 기사만 NULL로 저장, 나머지 batch 정상 유지
-        # (CUDA OOM 후 Ollama가 OOM 상태일 때 embedding 호출도 실패할 수 있음)
-        embed_text = f"{title_ko}\n{translation}" if title_ko else translation
-        try:
-            embedding = make_embedding(embed_text) if embed_text.strip() else None
-        except Exception as e:
-            print(f"[WARN] 임베딩 실패 ({url[:60]}): {e} → NULL로 저장")
-            embedding = None
-
+        # DB에 저장할 한 기사의 데이터를 딕셔너리로 조립
         batch.append({
-            "url_hash":          url_hash,
-            "url":               url,
-            "title":             title_ko or title,  # 한국어 제목 우선, 없으면 영문 원제
-            "title_en":          title,
-            "source":            source,
-            "source_type":       source_type,
-            "category":          a.get("category"),
-            "country":           a.get("country"),
-            "keywords":          a.get("keywords") or [],
-            "published_at":      a.get("published_at"),
-            "collected_at":      datetime.now(timezone.utc).isoformat(),
-            "content":           content,
-            "credibility_score": score,
-            "fact_label":        fact_label,
-            "needs_review":      fact_label == "UNVERIFIED",
-            "translation":       translation,
-            "summary_formal":    a.get("summary_formal"),
-            "summary_casual":    a.get("summary_casual"),
-            "summary_en":        a.get("summary_en"),
-            "embedding":         embedding,
+            "url_hash":          make_url_hash(url),     # PK: URL의 MD5 해시
+            "url":               url,                    # 원문 URL
+            "title":             a.get("title") or title_en,  # 한국어 제목, 없으면 영어 fallback
+            "title_en":          title_en,
+            "source":            a.get("source"),        # 언론사명
+            "source_type":       a.get("source_type"),   # 'media' | 'community'
+            "category":          a.get("category"),      # 카테고리
+            "country":           a.get("country"),       # 발행 국가
+            "keywords":          a.get("keywords") or [], # 키워드 배열
+            "published_at":      a.get("published_at"),  # 기사 발행 시각 (ISO 8601)
+            "collected_at":      datetime.now(timezone.utc).isoformat(),  # 수집 시각 자동 기록
+            "content":           a.get("content"),       # 영문 원문 본문
+            "credibility_score": score,                  # 신뢰도 점수
+            "fact_label":        infer_fact_label(score),# 자동 분류된 팩트 라벨
+            "translation":       a.get("translation"),   # 한국어 번역 전문
+            "summary_formal":    a.get("summary_formal"),# 격식체 3줄 요약
+            "summary_casual":    a.get("summary_casual"),# 일상체 3줄 요약
+            "embedding":         embedding,              # 임베딩 벡터 (RAG에 사용)
         })
 
-    if not batch:
-        print(f"[DB] 저장 대상 없음 (전체 {dropped}건 DROP)")
-        return 0
-
+    # upsert: url_hash가 이미 있으면 업데이트, 없으면 새로 추가
+    # on_conflict="url_hash": PK 충돌 시 기존 행을 덮어쓴다
+    # 크론탭이 1시간마다 같은 기사를 수집해도 중복 저장되지 않음
     sb.table("articles").upsert(batch, on_conflict="url_hash").execute()
-    print(f"[DB] articles {len(batch)}건 저장 완료 (DROP {dropped}건 제외)")
+    print(f"[DB] articles {len(batch)}건 저장 완료")
     return len(batch)
 
 
-# ── neologisms ────────────────────────────────────────────────
+# ── neologisms 테이블 저장 ────────────────────────────────────
 
 def save_neologisms(terms: list[str], url_hash: str) -> None:
     """
-    번역 결과에서 추출된 신조어 목록 일괄 upsert.
-    - 처음 등장: INSERT
-    - 재등장:    occurrence_count +1
-    explanation은 MVP에서 NULL 허용 (수동 검수 후 채움).
+    번역 결과에서 발견된 AI 신조어를 neologisms 테이블에 저장한다.
+    두 가지 역할을 한다:
+      1. 실시간 캐시: 같은 용어 재등장 시 검색엔진 재호출 없이 바로 사용
+      2. 파인튜닝 말뭉치: confirmed=True 데이터를 학습 데이터로 활용
 
     Args:
-        terms:    신조어 영문 원어 리스트 (예: ['Blackwell Ultra', 'RLHF'])
-        url_hash: 해당 기사의 url_hash
+        terms:    신조어 영문 원어 리스트 (예: ["Blackwell Ultra", "RLHF"])
+        url_hash: 해당 기사의 url_hash (최초 등장 기록용)
     """
     for term in terms:
+        # 이미 DB에 있는 신조어인지 확인
         existing = (
             sb.table("neologisms")
             .select("term, occurrence_count")
             .eq("term", term)
             .execute()
         )
+
         if existing.data:
+            # 이미 있으면 등장 횟수만 1 증가
             sb.table("neologisms").update({
                 "occurrence_count": existing.data[0]["occurrence_count"] + 1,
             }).eq("term", term).execute()
         else:
+            # 처음 등장한 신조어면 새로 추가
+            # explanation은 MVP에서 NULL — 나중에 수동 검수 후 채움
             sb.table("neologisms").insert({
                 "term":                term,
-                "first_seen_url_hash": url_hash,
+                "first_seen_url_hash": url_hash,   # 최초 등장 기사 연결
                 "occurrence_count":    1,
-                "confirmed":           False,
+                "confirmed":           False,       # 수동 검수 전까지는 미확인
                 "created_at":          datetime.now(timezone.utc).isoformat(),
             }).execute()
 
@@ -184,38 +163,34 @@ def save_neologisms(terms: list[str], url_hash: str) -> None:
         print(f"[DB] neologisms {len(terms)}건 upsert 완료")
 
 
-# ── fact_checks ───────────────────────────────────────────────
+# ── fact_checks 테이블 저장 ───────────────────────────────────
 
 def save_fact_checks(url_hash: str, claims: list[dict]) -> None:
     """
-    팩트체크 결과 저장.
+    팩트체크 세부 기록을 저장한다. (MVP 이후 활용)
 
-    claims 리스트 각 항목 (pipeline.FactCheckResult.to_claim_dict() 출력):
-        {
-            "claim":               "엔비디아 시총 3조 달러 돌파",
-            "verdict":             "FACT",       # FACT | RUMOR | UNVERIFIED
-            "confidence":          0.92,
-            "evidence_url":        None,
-            "verification_method": "gemini",     # auto | google_fc | gemini | cove | debate
-            "importance_score":    0.767,
-            "reasoning_trace":     "...",        # 한국어 판단 근거
-        }
+    articles.fact_label은 기사 전체의 신뢰도를 나타내지만,
+    어떤 주장이 왜 RUMOR인지 상세 내용은 이 테이블에 저장된다.
+    기사 1개에 여러 주장이 있을 수 있어서 1:N 구조.
+
+    Args:
+        url_hash: 해당 기사의 url_hash
+        claims:   팩트체크 결과 리스트
+                  각 항목: {"claim": "...", "verdict": "FACT", "confidence": 0.92}
     """
     if not claims:
-        return
+        return   # 검증할 주장이 없으면 바로 종료
 
+    # 각 주장을 DB에 저장할 형식으로 변환
     rows = [
         {
-            "article_url_hash":   url_hash,
-            "claim":              c.get("claim"),
-            "verdict":            c.get("verdict", "UNVERIFIED"),
-            "confidence":         c.get("confidence"),
-            "evidence_url":       c.get("evidence_url"),
-            "checker_type":       "ai",
-            "verification_method": c.get("verification_method"),
-            "importance_score":   c.get("importance_score"),
-            "reasoning_trace":    c.get("reasoning_trace"),
-            "checked_at":         datetime.now(timezone.utc).isoformat(),
+            "article_url_hash": url_hash,                    # 어느 기사의 팩트체크인지
+            "claim":            c.get("claim"),              # 검증 대상 주장 원문
+            "verdict":          c.get("verdict", "UNVERIFIED"), # 팩트체크 결과
+            "confidence":       c.get("confidence"),         # AI 확신도 (0.0~1.0)
+            "evidence_url":     c.get("evidence_url"),       # 근거 URL (MVP: None)
+            "checker_type":     "ai",                        # MVP에서는 항상 AI 검증
+            "checked_at":       datetime.now(timezone.utc).isoformat(),
         }
         for c in claims
     ]
@@ -223,28 +198,29 @@ def save_fact_checks(url_hash: str, claims: list[dict]) -> None:
     print(f"[DB] fact_checks {len(rows)}건 저장 완료")
 
 
-# ── eval_results ──────────────────────────────────────────────
+# ── eval_results 테이블 저장 ──────────────────────────────────
 
 def save_eval_result(
-    url_hash:      str,
-    model_version: str,
-    eval_type:     str,
-    **metrics,
+    url_hash:      str,   # 평가 대상 기사
+    model_version: str,   # 예: 'qwen3-4b-base', 'qwen3-4b-ft-v1', 'gpt-4o'
+    eval_type:     str,   # 'translation' | 'summary_formal'
+    **metrics,            # 평가 지표 (아래 참고)
 ) -> None:
     """
-    평가 결과 1건 저장 (파인튜닝 전/후 비교용, MVP 이후).
+    파인튜닝 전/후 평가 지표를 저장한다. (4주차~)
 
-    eval_type = 'translation'    → metrics: bleu, comet, tpr
-    eval_type = 'summary_formal' → metrics: geval_consistency, geval_fluency,
-                                             geval_coherence, geval_relevance,
-                                             geval_avg, geval_weighted
-    예시:
-        save_eval_result(hash, 'qwen3.5-4b-base', 'translation', bleu=12.3, comet=0.71, tpr=0.88)
+    같은 기사를 여러 모델로 평가해서 성능을 비교할 수 있다.
+    예: 베이스 모델 vs 파인튜닝 모델 vs GPT-4o
+
+    eval_type별 metrics:
+      'translation'    → bleu(번역 품질), comet(의미 보존), tpr(신조어 유지율)
+      'summary_formal' → geval_faithfulness, geval_fluency,
+                         geval_conciseness, geval_relevance (각 1~5점)
     """
     sb.table("eval_results").insert({
         "article_url_hash": url_hash,
         "model_version":    model_version,
         "eval_type":        eval_type,
         "evaluated_at":     datetime.now(timezone.utc).isoformat(),
-        **metrics,
+        **metrics,   # bleu, comet 등 추가 지표를 딕셔너리로 풀어서 저장
     }).execute()

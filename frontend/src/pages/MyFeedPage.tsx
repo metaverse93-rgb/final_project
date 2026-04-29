@@ -1,16 +1,19 @@
 import { useState, useEffect, useCallback } from 'react';
-import { fetchFeed } from '../data/api';
-import type { FeedArticle } from '../data/api';
+import { fetchFeed, postOnboarding } from '../data/api';
+import type { Article } from '../data/articles';
 import ArticleCard from '../components/ArticleCard';
 import DetailPage from './DetailPage';
 import type { BookmarkHook } from '../hooks/useBookmarks';
 import type { Interest } from './OnboardingPage';
 
+type FeedItem = Article & { similarity?: number };
+
 const ALL_INTERESTS: { id: Interest; emoji: string; desc: string }[] = [
-  { id: '신규 출시/제품', emoji: '🚀', desc: '스냅드래곤, 엑시노스 등 신제품 출시 소식' },
-  { id: '기술 이슈',     emoji: '⚡', desc: 'AI·반도체·소프트웨어 핵심 기술 동향' },
-  { id: '블록체인/양자', emoji: '🔬', desc: '블록체인, 양자컴퓨팅 관련 뉴스' },
-  { id: '대기업',        emoji: '🏢', desc: '구글·MS·애플·Meta·삼성 등 빅테크 동향' },
+  { id: 'AI 연구·심층', emoji: '🔬', desc: 'MIT TR · The Decoder — AI 최신 연구 및 심층 분석' },
+  { id: 'AI 스타트업',  emoji: '🚀', desc: 'TechCrunch · VentureBeat — AI 스타트업·투자 동향' },
+  { id: '테크 전반',    emoji: '💻', desc: 'The Verge — AI를 포함한 테크 업계 전반 소식' },
+  { id: 'AI 윤리·정책', emoji: '⚖️', desc: 'The Guardian — AI 윤리·규제·사회적 영향' },
+  { id: 'AI·반도체',   emoji: '🔧', desc: 'IEEE Spectrum — AI 칩·반도체 기술 동향' },
 ];
 
 type MyTab = 'feed' | 'bookmarks' | 'interests';
@@ -25,9 +28,9 @@ interface Props {
 export default function MyFeedPage({ bm, interests, onInterestsChange, userId }: Props) {
   const [tab, setTab]           = useState<MyTab>('feed');
   const [editMode, setEditMode] = useState(false);
-  const [detail, setDetail]     = useState<FeedArticle | null>(null);
+  const [detail, setDetail]     = useState<FeedItem | null>(null);
 
-  const [feedArticles, setFeedArticles] = useState<FeedArticle[]>([]);
+  const [feedArticles, setFeedArticles] = useState<FeedItem[]>([]);
   const [feedLoading, setFeedLoading]   = useState(false);
   const [feedError, setFeedError]       = useState<string | null>(null);
 
@@ -38,71 +41,77 @@ export default function MyFeedPage({ bm, interests, onInterestsChange, userId }:
     setFeedLoading(true);
     setFeedError(null);
     fetchFeed(userId, 20)
-      .then(data => { setFeedArticles(data); setFeedLoading(false); })
+      .then(data => {
+        setFeedArticles(data);
+        setFeedLoading(false);
+      })
       .catch(() => { setFeedError('피드를 불러오지 못했어요'); setFeedLoading(false); });
   }, [userId]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- userId 변경 시 피드 재로드 (loadFeed는 버튼과 공유)
     loadFeed();
   }, [loadFeed]);
 
   const toggleInterest = (id: Interest) => {
-    onInterestsChange(
-      interests.includes(id) ? interests.filter(i => i !== id) : [...interests, id]
-    );
+    const next = interests.includes(id)
+      ? interests.filter(i => i !== id)
+      : [...interests, id];
+    onInterestsChange(next);
+    if (userId) {
+      postOnboarding(userId, next).catch(() =>
+        console.warn('[MyFeed] 관심 주제 백엔드 동기화 실패 — 로컬 상태는 유지'),
+      );
+    }
   };
 
   if (detail) return (
     <DetailPage
       article={detail}
-      bookmarked={bm.isBookmarked(detail.id)}
+      bookmarked={bm.isBookmarked(detail.urlHash)}
       onBookmark={bm.toggle}
       onBack={() => setDetail(null)}
     />
   );
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', background: 'var(--color-header-bg)' }}>
       <style>{`
         @keyframes fadeSlide { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
         @keyframes spin { to{transform:rotate(360deg)} }
       `}</style>
 
-      {/* 헤더 */}
-      <header style={{ background: 'var(--color-surface)', borderBottom: '0.5px solid var(--color-border)', flexShrink: 0 }}>
-        <div style={{ padding: '18px 20px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <header style={{ flexShrink: 0, padding: '22px 20px 0' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
           <div>
-            <h1 style={{ fontSize: 20, fontWeight: 700, letterSpacing: '-0.03em', marginBottom: 2 }}>내 피드</h1>
-            <p style={{ fontSize: 12, color: 'var(--color-text-tertiary)' }}>
+            <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: '-0.04em', color: 'var(--color-header-text)', marginBottom: 3 }}>내 피드</h1>
+            <p style={{ fontSize: 12, color: 'var(--color-header-text-secondary)' }}>
               관심 주제 {interests.length}개 · 북마크 {bookmarkCount}개
             </p>
           </div>
           <div style={{
             width: 40, height: 40, borderRadius: '50%',
-            background: 'linear-gradient(135deg,#4F46E5 0%,#7C3AED 100%)',
+            background: 'linear-gradient(135deg,#3081fb 0%,#1960ca 100%)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             fontSize: 14, fontWeight: 700, color: '#fff',
           }}>AI</div>
         </div>
 
-        {/* 탭 */}
-        <div style={{ display: 'flex', marginTop: 12 }}>
+        <div style={{ display: 'flex', gap: 7, marginTop: 14, paddingBottom: 16, overflowX: 'auto', scrollbarWidth: 'none' }}>
           {([['feed','추천 피드'], ['bookmarks','북마크'], ['interests','관심 주제']] as [MyTab, string][]).map(([id, label]) => (
             <button key={id} onClick={() => setTab(id)} style={{
-              flex: 1, padding: '10px 0', fontSize: 13,
-              fontWeight: tab === id ? 600 : 400,
-              color: tab === id ? 'var(--color-primary)' : 'var(--color-text-tertiary)',
-              borderBottom: `2px solid ${tab === id ? 'var(--color-primary)' : 'transparent'}`,
-              transition: 'all 0.15s',
+              flexShrink: 0, fontSize: 12,
+              fontWeight: tab === id ? 700 : 400,
+              color: tab === id ? '#FFFFFF' : '#6B7684',
+              background: tab === id ? '#111111' : '#F2F4F6',
+              border: 'none',
+              padding: '6px 16px', borderRadius: 20, transition: 'all 0.15s', whiteSpace: 'nowrap',
             }}>{label}</button>
           ))}
         </div>
       </header>
 
-      <main style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+      <main style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', background: 'var(--color-bg)', borderRadius: '32px 32px 0 0' }}>
 
-        {/* ── 추천 피드 탭 */}
         {tab === 'feed' && (
           <div style={{ padding: '12px 16px 24px', display: 'flex', flexDirection: 'column', gap: 10 }}>
             {feedLoading && (
@@ -128,10 +137,10 @@ export default function MyFeedPage({ bm, interests, onInterestsChange, userId }:
               </div>
             )}
             {!feedLoading && feedArticles.map((article, i) => (
-              <div key={article.id} style={{ position: 'relative', animation: `fadeSlide 0.25s ${i * 0.04}s ease both` }}>
+              <div key={article.urlHash} style={{ position: 'relative', animation: `fadeSlide 0.25s ${i * 0.04}s ease both` }}>
                 <ArticleCard
                   article={article}
-                  bookmarked={bm.isBookmarked(article.id)}
+                  bookmarked={bm.isBookmarked(article.urlHash)}
                   onBookmark={bm.toggle}
                   onClick={() => setDetail(article)}
                 />
@@ -151,7 +160,6 @@ export default function MyFeedPage({ bm, interests, onInterestsChange, userId }:
           </div>
         )}
 
-        {/* ── 북마크 탭 */}
         {tab === 'bookmarks' && (
           <div style={{ padding: '12px 16px 24px', display: 'flex', flexDirection: 'column', gap: 10 }}>
             {bookmarkCount === 0 ? (
@@ -162,20 +170,17 @@ export default function MyFeedPage({ bm, interests, onInterestsChange, userId }:
                 </p>
               </div>
             ) : (
-              feedArticles
-                .filter(a => bm.isBookmarked(a.id))
-                .map((article, i) => (
-                  <ArticleCard key={article.id} article={article}
-                    bookmarked={bm.isBookmarked(article.id)} onBookmark={bm.toggle}
-                    onClick={() => setDetail(article)}
-                    style={{ animation: `fadeSlide 0.25s ${i * 0.05}s ease both` }}
-                  />
-                ))
+              bm.bookmarkedList.map((article, i) => (
+                <ArticleCard key={article.urlHash} article={article}
+                  bookmarked={bm.isBookmarked(article.urlHash)} onBookmark={bm.toggle}
+                  onClick={() => setDetail(article)}
+                  style={{ animation: `fadeSlide 0.25s ${i * 0.05}s ease both` }}
+                />
+              ))
             )}
           </div>
         )}
 
-        {/* ── 관심 주제 탭 */}
         {tab === 'interests' && (
           <div style={{ padding: '16px 16px 24px' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>

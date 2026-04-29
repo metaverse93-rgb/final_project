@@ -10,12 +10,13 @@ import logging
 import os
 
 from fastapi import FastAPI, HTTPException
-from typing import Literal
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from supabase import create_client
 
-from backend.embedder import make_embedding
+from backend.embedder import make_embedding, expand_query
 from config import get_settings
 
 _settings = get_settings()
@@ -105,7 +106,7 @@ def get_articles(
         "url_hash, url, title, title_en, source, source_type, category, country, "
         "keywords, published_at, collected_at, content, "
         "credibility_score, fact_label, "
-        "translation, summary_formal, summary_casual, summary_en"
+        "translation, summary_formal, summary_casual"
     )
 
     if category:
@@ -145,27 +146,58 @@ def save_articles_endpoint(req: ArticleRequest):
 
 
 @app.get("/search")
-def search(q: str, top_k: int = 15, category: str | None = None):
+def search(q: str, top_k: int = 10, threshold: float = 0.4):
     """
-    SearchPage에서 자연어 검색을 할 때 호출된다.
-    벡터 유사도 + pg_trgm 퍼지 키워드를 RRF로 결합한 하이브리드 검색.
+    하이브리드 검색: LLM 쿼리 확장 벡터 검색 + 키워드 폴백.
+
+    흐름:
+      1. LLM으로 쿼리를 한/영 키워드로 확장 (예: "엔비디아" → "엔비디아 NVIDIA GPU ...")
+      2. 확장 쿼리 임베딩 → pgvector 유사도 검색 (threshold 0.4 이상만)
+      3. 키워드 폴백: 제목(영문) 또는 번역(한국어)에 원본 검색어가 포함된 기사 추가
+         → 벡터 점수가 낮아도 직접 언급되면 결과에 포함
+      4. 중복 제거 후 유사도 내림차순 반환
     """
     if not q.strip():
         return {"results": []}
 
-    query_vector = make_embedding(q)
+    COLS = (
+        "url_hash, url, title, source, source_type, category, country, "
+        "keywords, published_at, credibility_score, fact_label, "
+        "translation, summary_formal, summary_casual"
+    )
 
-    params: dict = {
-        "query_text":   q,
+    # 1. LLM 쿼리 확장
+    expanded = expand_query(q)
+
+    # 2. 벡터 검색
+    query_vector = make_embedding(expanded)
+    vec_result = sb.rpc("match_articles", {
         "query_vector": query_vector,
-        "top_k":        top_k,
+        "top_k":        top_k * 2,
+    }).execute()
+
+    seen: dict = {}
+    for r in (vec_result.data or []):
+        if r.get("similarity", 0) >= threshold:
+            seen[r["url_hash"]] = r
+
+    # 3. 키워드 폴백: 제목(영문) 또는 한국어 번역에 검색어 포함 여부
+    try:
+        kw_result = sb.table("articles").select(COLS).or_(
+            f"title.ilike.%{q}%,translation.ilike.%{q}%"
+        ).limit(top_k).execute()
+        for r in (kw_result.data or []):
+            h = r["url_hash"]
+            if h not in seen:
+                seen[h] = {**r, "similarity": 0.65}  # 키워드 직접 매칭 = 신뢰도 0.65
+    except Exception:
+        pass  # 키워드 검색 실패해도 벡터 결과는 반환
+
+    results = sorted(seen.values(), key=lambda x: x.get("similarity", 0), reverse=True)
+    return {
+        "results":        results[:top_k],
+        "expanded_query": expanded,
     }
-    if category:
-        params["filter_category"] = category
-
-    result = sb.rpc("hybrid_search_articles", params).execute()
-
-    return {"results": result.data}
 
 
 @app.get("/health")
@@ -174,6 +206,63 @@ def health():
     서버 생존 확인. Railway 모니터링 등에 사용.
     """
     return {"status": "ok"}
+
+
+@app.get("/debug")
+def debug():
+    """Supabase 연결 및 환경변수 확인용 (임시)"""
+    import requests as _req
+    supabase_url = (_settings.supabase_url or os.getenv("SUPABASE_URL", "")).rstrip("/")
+    sb_key = os.getenv("SUPABASE_KEY", "") or _settings.supabase_anon_key
+
+    # URL 형식 진단
+    url_issues = []
+    if "/rest/v1" in supabase_url:
+        url_issues.append("URL에 /rest/v1 포함됨 — 제거 필요")
+    if supabase_url.count("supabase.co") == 0 and supabase_url:
+        url_issues.append("supabase.co 도메인 아님")
+
+    # supabase-py 없이 직접 REST 호출 테스트
+    direct_ok = False
+    direct_error = ""
+    try:
+        r = _req.get(
+            f"{supabase_url}/rest/v1/articles?select=url_hash&limit=1",
+            headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"},
+            timeout=5,
+        )
+        direct_ok = r.status_code == 200
+        direct_error = "" if direct_ok else f"HTTP {r.status_code}: {r.text[:200]}"
+    except Exception as e:
+        direct_error = str(e)
+
+    # supabase-py 테스트
+    sdk_ok = False
+    sdk_error = ""
+    try:
+        result = sb.table("articles").select("url_hash").limit(1).execute()
+        sdk_ok = True
+    except Exception as e:
+        sdk_error = str(e)[:300]
+
+    dist_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend", "dist")
+    dist_abs = os.path.abspath(dist_path)
+    index_exists = os.path.isfile(os.path.join(dist_abs, "index.html"))
+
+    return {
+        "supabase_url": supabase_url[:60],
+        "url_issues": url_issues,
+        "key_prefix": sb_key[:15] if sb_key else "",
+        "key_length": len(sb_key),
+        "direct_rest_ok": direct_ok,
+        "direct_rest_error": direct_error,
+        "sdk_ok": sdk_ok,
+        "sdk_error": sdk_error,
+        "dist_path": dist_abs,
+        "dist_exists": os.path.isdir(dist_abs),
+        "index_html_exists": index_exists,
+        "app_dir": os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")),
+    }
 
 
 @app.post("/translate")
@@ -202,52 +291,6 @@ def summarize(req: LlmTextRequest):
     }
 
 
-@app.get("/admin/review")
-def get_review_queue(limit: int = 50):
-    """
-    UNVERIFIED 기사 중 수동 검토 대기 목록 반환.
-    어드민 화면에서 사람이 직접 FACT/RUMOR 판정할 때 사용.
-    """
-    result = sb.table("articles").select(
-        "url_hash, title, source, published_at, fact_label, needs_review"
-    ).eq("needs_review", True).order("published_at", desc=True).limit(limit).execute()
-    return {"queue": result.data, "count": len(result.data)}
-
-
-class ReviewDecision(BaseModel):
-    verdict: Literal["FACT", "RUMOR", "UNVERIFIED"]
-    reviewer_note: str = ""
-
-
-@app.patch("/admin/review/{url_hash}")
-def submit_review(url_hash: str, body: ReviewDecision):
-    """
-    관리자가 UNVERIFIED 기사에 직접 판정을 내릴 때 호출.
-    fact_label 업데이트 후 needs_review = False 처리.
-    """
-    result = sb.table("articles").select("url_hash").eq("url_hash", url_hash).execute()
-    if not result.data:
-        raise HTTPException(status_code=404, detail="기사 없음")
-
-    sb.table("articles").update({
-        "fact_label":   body.verdict,
-        "needs_review": False,
-    }).eq("url_hash", url_hash).execute()
-
-    if body.reviewer_note:
-        sb.table("fact_checks").insert({
-            "article_url_hash":    url_hash,
-            "claim":               "human review",
-            "verdict":             body.verdict,
-            "confidence":          1.0,
-            "checker_type":        "human",
-            "verification_method": "human",
-            "reasoning_trace":     body.reviewer_note,
-        }).execute()
-
-    return {"message": f"{url_hash} → {body.verdict} 처리 완료"}
-
-
 @app.post("/article-view/{user_id}/{url_hash}")
 def record_article_view(user_id: str, url_hash: str):
     """프론트에서 기사 카드 조회 시 호출 — user_logs에 적재."""
@@ -257,3 +300,77 @@ def record_article_view(user_id: str, url_hash: str):
         "action": "view",
     }).execute()
     return {"message": "조회 기록 완료"}
+
+
+# ── 날짜별 핫이슈 ─────────────────────────────────────────────
+@app.get("/hot/{date}")
+def get_hot(date: str, top_k: int = 5):
+    """
+    date: YYYY-MM-DD 형식
+    해당 날짜의 조회수 TOP5 기사 반환.
+    조회 기록 없으면 해당 날짜 발행 기사 반환.
+    """
+    from collections import Counter
+    start = f"{date}T00:00:00+00:00"
+    end   = f"{date}T23:59:59+00:00"
+
+    cols = (
+        "url_hash, url, title, source, source_type, category, country, "
+        "keywords, published_at, credibility_score, fact_label, "
+        "translation, summary_formal, summary_casual"
+    )
+
+    # 해당 날짜 조회 기록 집계
+    logs = (
+        sb.table("user_logs")
+        .select("url_hash")
+        .eq("action", "view")
+        .gte("created_at", start)
+        .lte("created_at", end)
+        .execute()
+    )
+
+    if logs.data:
+        counts = Counter(r["url_hash"] for r in logs.data)
+        top_hashes = [h for h, _ in counts.most_common(top_k)]
+        result = []
+        for url_hash in top_hashes:
+            a = sb.table("articles").select(cols).eq("url_hash", url_hash).execute()
+            if a.data:
+                result.append({**a.data[0], "view_count": counts[url_hash]})
+        return result
+    else:
+        # 조회 기록 없으면 해당 날짜 발행 기사 반환
+        result = (
+            sb.table("articles")
+            .select(cols)
+            .gte("published_at", start)
+            .lte("published_at", end)
+            .order("credibility_score", desc=True)
+            .limit(top_k)
+            .execute()
+        )
+        return [{**a, "view_count": 0} for a in result.data]
+
+
+# ── 로그 직접 기록 (대안 엔드포인트) ────────────────────────
+@app.post("/logs/view")
+def log_view(user_id: str, url_hash: str):
+    sb.table("user_logs").insert({
+        "user_id": user_id,
+        "url_hash": url_hash,
+        "action": "view",
+    }).execute()
+    return {"message": "기록 완료"}
+
+
+# ── 프론트엔드 정적 파일 서빙 (SPA) ────────────────────────
+# API 라우트 정의 후 맨 마지막에 마운트해야 API가 우선됨
+_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend", "dist")
+if os.path.isdir(_DIST):
+    app.mount("/assets", StaticFiles(directory=os.path.join(_DIST, "assets")), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_spa(full_path: str = ""):
+        """React SPA — 모든 미매칭 경로를 index.html로 돌려줌"""
+        return FileResponse(os.path.join(_DIST, "index.html"))
