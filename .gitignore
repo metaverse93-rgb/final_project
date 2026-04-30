@@ -19,6 +19,7 @@ articles_translated.jsonl
 *.jsonl
 eval/data/
 token.json
+client_secret*.json
 
 # diff 임시파일
 diff_*.txt
@@ -34,3 +35,6 @@ dist/
 
 # Claude Code
 .claude/
+
+# 로컬 파인튜닝 모델 가중치 (용량 대형)
+samsunmodel*/

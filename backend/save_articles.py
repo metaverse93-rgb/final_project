@@ -106,7 +106,7 @@ def save_articles(articles: list[dict]) -> int:
             "collected_at":      datetime.now(timezone.utc).isoformat(),  # 수집 시각 자동 기록
             "content":           a.get("content"),       # 영문 원문 본문
             "credibility_score": score,                  # 신뢰도 점수
-            "fact_label":        infer_fact_label(score),# 자동 분류된 팩트 라벨
+            "fact_label":        a.get("fact_label") or infer_fact_label(score),
             "translation":       a.get("translation"),   # 한국어 번역 전문
             "summary_formal":    a.get("summary_formal"),# 격식체 3줄 요약
             "summary_casual":    a.get("summary_casual"),# 일상체 3줄 요약

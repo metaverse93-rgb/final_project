@@ -7,10 +7,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'collect'))
 
 from crawler.rss_crawler import fetch_all
 from pipeline.translate_summarize import translate_and_summarize, estimate_sentences
+from fact_checker.pipeline import run_fact_check
 
 
 def run_pipeline(max_articles: int = 10, summary_sentences: int = 3):
-    """RSS 수집(이상준) → 번역+요약(이동우) 통합 파이프라인"""
+    """RSS 수집(이상준) → 팩트체크 → 번역+요약(이동우) 통합 파이프라인"""
 
     print("=" * 60)
     print("[ 1단계: RSS 수집 (이상준 파트) ]")
@@ -21,12 +22,32 @@ def run_pipeline(max_articles: int = 10, summary_sentences: int = 3):
     print(f"\n총 {len(articles)}건 수집 완료\n")
 
     print("=" * 60)
-    print("[ 2단계: 번역 + 요약 (이동우 파트) ]")
+    print("[ 2단계: 팩트체크 ]")
+    print("=" * 60)
+
+    # DROP 기사 필터링 + fact_label 결정
+    checked = []
+    for article in articles:
+        fc = run_fact_check(
+            title=article.title,
+            content=article.content or "",
+            source=article.source,
+            source_type=article.source_type,
+        )
+        if fc.fact_label == "DROP":
+            print(f"  [DROP] {article.source} — {article.title[:50]}")
+            continue
+        checked.append((article, fc.fact_label))
+
+    print(f"  팩트체크 완료: {len(checked)}/{len(articles)}건 통과\n")
+
+    print("=" * 60)
+    print("[ 3단계: 번역 + 요약 (이동우 파트) ]")
     print("=" * 60)
 
     results = []
-    for i, article in enumerate(articles, 1):
-        print(f"\n[{i}/{len(articles)}] [{article.source}] {article.title[:60]}...")
+    for i, (article, fact_label) in enumerate(checked, 1):
+        print(f"\n[{i}/{len(checked)}] [{article.source}] {article.title[:60]}...")
         try:
             text = article.content or article.title
             n = estimate_sentences(text, max_sentences=summary_sentences)
@@ -40,8 +61,8 @@ def run_pipeline(max_articles: int = 10, summary_sentences: int = 3):
                 "source_type":       article.source_type,
                 "category":          article.category,
                 "country":           article.country,
-                "title":             processed.get("title", ""),   # 한국어 제목
-                "title_en":          article.title,                # 영어 원제
+                "title":             processed.get("title", ""),
+                "title_en":          article.title,
                 "url":               article.url,
                 "credibility_score": article.credibility_score,
                 "published_at":      article.published_at,
@@ -50,10 +71,12 @@ def run_pipeline(max_articles: int = 10, summary_sentences: int = 3):
                 "translation":       processed.get("translation", ""),
                 "summary_formal":    processed.get("summary_formal", ""),
                 "summary_casual":    processed.get("summary_casual", ""),
+                "fact_label":        fact_label,
             }
             results.append(result)
 
             print(f"  [한국어 제목]  {result['title'][:50]}")
+            print(f"  [팩트 라벨]   {fact_label}")
             print(f"  [번역]        {result['translation'][:50]}...")
             print(f"  [격식체 요약]  {result['summary_formal'][:50]}...")
             print(f"  [일상체 요약]  {result['summary_casual'][:50]}...")
@@ -64,6 +87,7 @@ def run_pipeline(max_articles: int = 10, summary_sentences: int = 3):
                 "title":          "",
                 "title_en":       article.title,
                 "url":            article.url,
+                "fact_label":     fact_label,
                 "translation":    "",
                 "summary_formal": "",
                 "summary_casual": "",
